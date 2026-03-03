@@ -167,7 +167,18 @@ async function handleFeed(request, url, env) {
     listings = await res.json();
   }
 
-  return json({ listings: listings || [] }, 200, request);
+  // Shuffle so you don't get the same auction house 50 times in a row
+  listings = shuffle(listings || []);
+
+  return json({ listings }, 200, request);
+}
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }
 
 // ── POST /swipe ───────────────────────────────────────────
