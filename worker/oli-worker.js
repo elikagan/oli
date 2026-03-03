@@ -213,8 +213,8 @@ async function updateTasteProfile(env, embedding, action) {
   const centroidKey = side + '_centroid';
   const countKey = side + '_count';
 
-  // Super like/hate count as 3x weight in taste model
-  const weight = (action === 'super_like' || action === 'super_hate') ? 3 : 1;
+  // Super like/hate = 25x weight (nuclear options for strong taste signals)
+  const weight = (action === 'super_hate' || action === 'super_like') ? 25 : 1;
 
   // Get current profile
   const res = await supa(env, 'taste_profile?id=eq.1&select=*');
