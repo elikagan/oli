@@ -114,7 +114,15 @@ function supaRpc(env, fnName, params = {}) {
 async function handleFeed(request, url, env) {
   const limit = parseInt(url.searchParams.get('limit') || '20');
   const excludeRaw = url.searchParams.get('exclude') || '';
-  const excludeIds = excludeRaw ? excludeRaw.split(',').filter(Boolean) : [];
+  const clientExcludeIds = excludeRaw ? excludeRaw.split(',').filter(Boolean) : [];
+
+  // Fetch all previously-swiped listing IDs from server (dedupes across devices)
+  const swipedRes = await supa(env, 'swipes?select=listing_id');
+  const swipedRows = await swipedRes.json();
+  const serverSwipedIds = (Array.isArray(swipedRows) ? swipedRows : []).map(r => r.listing_id);
+
+  // Merge client + server exclude lists
+  const excludeIds = [...new Set([...clientExcludeIds, ...serverSwipedIds])];
 
   // Get taste profile
   const profileRes = await supa(env, 'taste_profile?id=eq.1&select=*');
