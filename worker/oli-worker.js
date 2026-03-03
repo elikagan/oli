@@ -120,13 +120,16 @@ async function handleFeed(request, url, env) {
 
   let listings;
 
+  const selectFields = 'id,platform,platform_id,title,description,price,location,url,hero_image,image_urls,auction_house,auction_date,lot_number,ai_description';
+  const excludeFilter = excludeIds.length > 0
+    ? `&id=not.in.(${excludeIds.join(',')})`
+    : '';
+
   if (profile && profile.positive_centroid && profile.positive_count >= 10) {
     // ── Ranked mode: use taste model ──
-    // Get 80% ranked + 20% random
     const rankedCount = Math.ceil(limit * 0.8);
     const randomCount = limit - rankedCount;
 
-    // Ranked via pgvector similarity
     const matchRes = await supaRpc(env, 'match_listings', {
       query_embedding: profile.positive_centroid,
       match_count: rankedCount,
@@ -134,20 +137,21 @@ async function handleFeed(request, url, env) {
     });
     const ranked = await matchRes.json();
 
-    // Random exploration
-    const rankedIds = ranked.map(r => r.id);
-    const allExclude = [...excludeIds, ...rankedIds];
+    // Random exploration (exclude ranked IDs too)
+    const rankedIds = (Array.isArray(ranked) ? ranked : []).map(r => r.id);
+    const allExcludeFilter = [...excludeIds, ...rankedIds].length > 0
+      ? `&id=not.in.(${[...excludeIds, ...rankedIds].join(',')})`
+      : '';
     const randomRes = await supa(env,
-      `listings?status=eq.active&embedding=not.is.null&id=not.in.(${allExclude.join(',')})&select=id,platform,platform_id,title,description,price,location,url,hero_image,image_urls,auction_house,auction_date,lot_number,ai_description&order=scraped_at.desc&limit=${randomCount}`
+      `listings?status=eq.active&embedding=not.is.null${allExcludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${randomCount}`
     );
     const random = await randomRes.json();
 
-    // Merge and shuffle (keeping ranked first but mixing in random)
-    listings = [...ranked, ...random];
+    listings = [...(Array.isArray(ranked) ? ranked : []), ...(Array.isArray(random) ? random : [])];
   } else {
-    // ── Cold start: newest first with some randomization ──
+    // ── Cold start: newest first ──
     const res = await supa(env,
-      `listings?status=eq.active&id=not.in.(${excludeIds.join(',') || "''"})&select=id,platform,platform_id,title,description,price,location,url,hero_image,image_urls,auction_house,auction_date,lot_number,ai_description&order=scraped_at.desc&limit=${limit}`
+      `listings?status=eq.active${excludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${limit}`
     );
     listings = await res.json();
   }
