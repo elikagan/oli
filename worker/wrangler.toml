@@ -1,0 +1,12 @@
+name = "oli-api"
+main = "oli-worker.js"
+compatibility_date = "2024-09-25"
+
+[triggers]
+crons = ["0 */4 * * *"]
+
+[vars]
+# Set these via `wrangler secret put`:
+# GEMINI_KEY
+# SUPABASE_URL
+# SUPABASE_SERVICE_KEY
