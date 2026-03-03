@@ -29,6 +29,9 @@ export default {
       if (url.pathname === '/scrape' && request.method === 'POST')
         return handleScrape(request, env);
 
+      if (url.pathname === '/process' && request.method === 'POST')
+        return handleProcess(request, env);
+
       if (url.pathname === '/stats' && request.method === 'GET')
         return handleStats(request, env);
 
@@ -39,9 +42,19 @@ export default {
     }
   },
 
-  // Cron trigger — scrape + process
+  // Cron trigger — scrape one house per run (rotates through them)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runPipeline(env));
+    const sellerIds = Object.keys(LA_SELLERS);
+    // Use hour of day to rotate which house gets scraped
+    const hour = new Date().getUTCHours();
+    const idx = Math.floor(hour / 4) % sellerIds.length; // 6 cron runs/day, rotate through houses
+    const sellerId = parseInt(sellerIds[idx]);
+    const houseName = LA_SELLERS[sellerId];
+    ctx.waitUntil(
+      scrapeSellerListings(env, sellerId, houseName)
+        .then(count => console.log(`[OLI] Cron scraped ${houseName}: ${count} new`))
+        .catch(e => console.error(`[OLI] Cron failed for ${houseName}:`, e))
+    );
   }
 };
 
@@ -277,8 +290,31 @@ async function handleStats(request, env) {
 // ── POST /scrape ──────────────────────────────────────────
 
 async function handleScrape(request, env) {
-  await runPipeline(env);
-  return json({ ok: true, message: 'Scrape + process pipeline complete' }, 200, request);
+  try {
+    const { seller_id } = await request.json().catch(() => ({}));
+
+    if (seller_id) {
+      // Scrape a single house
+      const houseName = LA_SELLERS[seller_id] || 'Unknown';
+      const count = await scrapeSellerListings(env, parseInt(seller_id), houseName);
+      return json({ ok: true, new_listings: count, house: houseName }, 200, request);
+    }
+
+    // No seller_id: return list of houses to scrape (caller loops)
+    const houses = Object.entries(LA_SELLERS).map(([id, name]) => ({ id, name }));
+    return json({ houses, message: 'POST with {seller_id} to scrape one house' }, 200, request);
+  } catch (e) {
+    return json({ error: e.message, stack: e.stack }, 500, request);
+  }
+}
+
+async function handleProcess(request, env) {
+  try {
+    await processUnembeddedListings(env);
+    return json({ ok: true }, 200, request);
+  } catch (e) {
+    return json({ error: e.message, stack: e.stack }, 500, request);
+  }
 }
 
 // ── Pipeline: Scrape → AI Describe → Embed ────────────────
@@ -363,7 +399,7 @@ async function scrapeLiveAuctioneers(env) {
 async function scrapeSellerListings(env, sellerId, houseName) {
   let totalNew = 0;
   let page = 1;
-  const maxPages = 10; // Safety limit
+  const maxPages = 5; // Keep runs short to avoid Worker timeout
 
   while (page <= maxPages) {
     const params = {
@@ -405,18 +441,26 @@ async function scrapeSellerListings(env, sellerId, houseName) {
 
     if (items.length === 0) break;
 
-    // Transform and upsert each item
-    for (const item of items) {
-      const inserted = await upsertLAListing(env, item, sellerId, houseName);
-      if (inserted) totalNew++;
-    }
+    // Batch transform all items on this page
+    const batch = items.map(item => transformLAItem(item, sellerId, houseName));
+
+    // Bulk upsert entire page in one Supabase call
+    const upsertRes = await supa(env, 'listings', {
+      method: 'POST',
+      body: JSON.stringify(batch),
+      headers: {
+        'Prefer': 'return=representation,resolution=ignore-duplicates'
+      }
+    });
+    const inserted = await upsertRes.json();
+    totalNew += Array.isArray(inserted) ? inserted.length : 0;
 
     // Check if more pages
     const totalPages = data?.payload?.totalPages || 0;
     if (page >= totalPages) break;
     page++;
 
-    await sleep(500);
+    await sleep(300);
   }
 
   return totalNew;
@@ -426,55 +470,28 @@ function buildLAImageUrl(sellerId, catalogId, itemId, photoIndex, imageVersion) 
   return `${LA_IMAGE_BASE}/${sellerId}/${catalogId}/${itemId}_${photoIndex}_x.jpg?height=600&quality=95&version=${imageVersion || ''}`;
 }
 
-async function upsertLAListing(env, item, sellerId, houseName) {
-  const platformId = String(item.itemId);
-
-  // Build image URLs from photos array
+function transformLAItem(item, sellerId, houseName) {
   const photos = item.photos || [1];
   const imageUrls = photos.map(p =>
     buildLAImageUrl(sellerId, item.catalogId, item.itemId, p, item.imageVersion)
   );
 
-  const location = [item.sellerCity, item.sellerStateCode].filter(Boolean).join(', ');
-  const lotUrl = `https://www.liveauctioneers.com/item/${item.itemId}`;
-
-  // Use low estimate as price, fall back to start price
-  const price = item.lowBidEstimate || item.startPrice || null;
-
-  // Convert sale start timestamp to ISO date
-  const auctionDate = item.saleStartTs
-    ? new Date(item.saleStartTs * 1000).toISOString()
-    : null;
-
-  const listing = {
+  return {
     platform: 'liveauctioneers',
-    platform_id: platformId,
+    platform_id: String(item.itemId),
     title: item.title || 'Untitled',
     description: item.shortDescription || '',
-    price,
+    price: item.lowBidEstimate || item.startPrice || null,
     currency: item.currency || 'USD',
-    location,
-    url: lotUrl,
+    location: [item.sellerCity, item.sellerStateCode].filter(Boolean).join(', '),
+    url: `https://www.liveauctioneers.com/item/${item.itemId}`,
     image_urls: imageUrls,
     hero_image: imageUrls[0] || null,
     auction_house: houseName,
-    auction_date: auctionDate,
+    auction_date: item.saleStartTs ? new Date(item.saleStartTs * 1000).toISOString() : null,
     lot_number: item.lotNumber || null,
     status: 'active'
   };
-
-  // Upsert (insert or skip if exists)
-  const res = await supa(env, 'listings', {
-    method: 'POST',
-    body: JSON.stringify(listing),
-    headers: {
-      'Prefer': 'return=representation,resolution=ignore-duplicates'
-    }
-  });
-
-  const result = await res.json();
-  // If result array has an item, it was inserted (new)
-  return Array.isArray(result) && result.length > 0;
 }
 
 async function scrapeCraigslist(env) {
