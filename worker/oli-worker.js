@@ -160,14 +160,16 @@ async function handleFeed(request, url, env) {
 
     listings = [...(Array.isArray(ranked) ? ranked : []), ...(Array.isArray(random) ? random : [])];
   } else {
-    // ── Cold start: newest first ──
+    // ── Cold start: fetch a big pool and shuffle to mix auction houses ──
+    const poolSize = Math.min(limit * 5, 200);
     const res = await supa(env,
-      `listings?status=eq.active${excludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${limit}`
+      `listings?status=eq.active${excludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${poolSize}`
     );
-    listings = await res.json();
+    const pool = await res.json();
+    listings = shuffle(pool || []).slice(0, limit);
   }
 
-  // Shuffle so you don't get the same auction house 50 times in a row
+  // Also shuffle ranked results to avoid runs of similar items
   listings = shuffle(listings || []);
 
   return json({ listings }, 200, request);
