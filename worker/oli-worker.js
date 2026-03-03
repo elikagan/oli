@@ -32,6 +32,9 @@ export default {
       if (url.pathname === '/process' && request.method === 'POST')
         return handleProcess(request, env);
 
+      if (url.pathname === '/debug-process' && request.method === 'POST')
+        return handleDebugProcess(request, env);
+
       if (url.pathname === '/stats' && request.method === 'GET')
         return handleStats(request, env);
 
@@ -314,10 +317,80 @@ async function handleScrape(request, env) {
 
 async function handleProcess(request, env) {
   try {
-    await processUnembeddedListings(env);
-    return json({ ok: true }, 200, request);
+    const result = await processUnembeddedListings(env);
+    return json({ ok: true, ...result }, 200, request);
   } catch (e) {
-    return json({ error: e.message, stack: e.stack }, 500, request);
+    return json({ error: e.message, stack: e.stack, type: 'handleProcess' }, 500, request);
+  }
+}
+
+// Debug endpoint
+async function handleDebugProcess(request, env) {
+  const errors = [];
+  try {
+    const res = await supa(env,
+      'listings?ai_description=is.null&status=eq.active&select=id,title,hero_image&limit=1'
+    );
+    const listings = await res.json();
+    if (!listings || listings.length === 0) return json({ msg: 'No unprocessed listings' }, 200, request);
+
+    const listing = listings[0];
+    errors.push({ step: 'got_listing', title: listing.title, image: listing.hero_image });
+
+    // Try fetching image
+    const imgRes = await fetch(listing.hero_image);
+    errors.push({ step: 'image_fetch', status: imgRes.status, type: imgRes.headers.get('content-type') });
+
+    const imgBuf = await imgRes.arrayBuffer();
+    errors.push({ step: 'image_buffer', size: imgBuf.byteLength });
+
+    const bytes = new Uint8Array(imgBuf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const imageBase64 = btoa(binary);
+    errors.push({ step: 'base64', length: imageBase64.length });
+
+    // Try Gemini
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { inline_data: { mime_type: 'image/jpeg', data: imageBase64 } },
+            { text: 'Describe this auction item in one paragraph.' }
+          ]}]
+        })
+      }
+    );
+    const geminiData = await geminiRes.json();
+    const desc = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+    errors.push({ step: 'gemini', status: geminiRes.status, desc_length: desc?.length, desc_preview: desc?.slice(0, 100), error: geminiData?.error });
+
+    // Try embedding
+    if (desc) {
+      const embRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=${env.GEMINI_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'models/gemini-embedding-001',
+            content: { parts: [{ text: desc }] },
+            outputDimensionality: 768
+          })
+        }
+      );
+      const embData = await embRes.json();
+      const emb = embData?.embedding?.values;
+      errors.push({ step: 'embedding', status: embRes.status, dim: emb?.length, error: embData?.error });
+    }
+
+    return json({ debug: errors }, 200, request);
+  } catch (e) {
+    errors.push({ step: 'error', msg: e.message, stack: e.stack });
+    return json({ debug: errors }, 500, request);
   }
 }
 
@@ -511,18 +584,19 @@ async function scrapeCraigslist(env) {
 // ── AI Processing ─────────────────────────────────────────
 
 async function processUnembeddedListings(env) {
-  // Get listings that have no ai_description yet
+  // Process only 5 per call to stay within 50 subrequest limit
+  // (each listing: 1 image fetch + 1 Gemini + 1 embedding + 1 Supabase write = 4 subrequests)
   const res = await supa(env,
-    'listings?ai_description=is.null&status=eq.active&select=id,title,description,hero_image&limit=20'
+    'listings?ai_description=is.null&status=eq.active&select=id,title,description,hero_image&limit=5'
   );
   const unprocessed = await res.json();
 
   if (!unprocessed || unprocessed.length === 0) {
     console.log('[OLI] No listings to process');
-    return;
+    return { processed: 0, remaining: 0 };
   }
 
-  console.log(`[OLI] Processing ${unprocessed.length} listings...`);
+  let processed = 0;
 
   for (const listing of unprocessed) {
     try {
@@ -530,8 +604,11 @@ async function processUnembeddedListings(env) {
       const aiDesc = await generateDescription(env, listing);
       if (!aiDesc) continue;
 
-      // Step 2: Generate embedding from description
-      const embedding = await generateEmbedding(env, aiDesc);
+      // Step 2: Generate embedding from combined text (auction data + AI description)
+      // Auction houses provide rich catalog data (artist, medium, period, dimensions)
+      // — embed that alongside the AI visual description for best taste signal
+      const combinedText = [listing.title, listing.description, aiDesc].filter(Boolean).join('. ');
+      const embedding = await generateEmbedding(env, combinedText);
       if (!embedding) continue;
 
       // Step 3: Update listing
@@ -543,14 +620,14 @@ async function processUnembeddedListings(env) {
         })
       });
 
+      processed++;
       console.log(`[OLI] Processed: ${listing.title}`);
-
-      // Rate limit: ~7 listings/min (2 Gemini calls per listing, 15 RPM limit)
-      await sleep(9000);
     } catch (e) {
       console.error(`[OLI] Failed to process listing ${listing.id}:`, e);
     }
   }
+
+  return { processed, remaining: 'unknown' };
 }
 
 async function generateDescription(env, listing) {
@@ -561,7 +638,13 @@ async function generateDescription(env, listing) {
   try {
     const imgRes = await fetch(listing.hero_image);
     const imgBuf = await imgRes.arrayBuffer();
-    imageBase64 = btoa(String.fromCharCode(...new Uint8Array(imgBuf)));
+    // Use chunked approach to avoid max call stack with spread operator
+    const bytes = new Uint8Array(imgBuf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    imageBase64 = btoa(binary);
   } catch (e) {
     console.error(`[OLI] Image fetch failed for ${listing.id}:`, e);
     // Fall back to text-only description
@@ -594,7 +677,7 @@ Write a rich, descriptive paragraph. Do not say "this is" or "the image shows". 
   };
 
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${env.GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_KEY}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -607,18 +690,19 @@ Write a rich, descriptive paragraph. Do not say "this is" or "the image shows". 
 }
 
 function generateTextOnlyDescription(listing) {
-  // Fallback: create description from title and listing description only
+  // Fallback: when no image, use the auction house's own catalog data
+  // For LiveAuctioneers this is rich (artist, medium, date, dimensions)
   return [listing.title, listing.description].filter(Boolean).join('. ');
 }
 
 async function generateEmbedding(env, text) {
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${env.GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=${env.GEMINI_KEY}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'models/text-embedding-004',
+        model: 'models/gemini-embedding-001',
         content: { parts: [{ text }] },
         outputDimensionality: 768
       })
