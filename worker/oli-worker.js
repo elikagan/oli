@@ -472,7 +472,9 @@ const LA_SELLERS = {
   7732:  'Catalog Projects',
   8902:  'Circa Auction',
   390:   'Uniques and Antiques, Inc.',
-  3967:  'Cain Modern Auctions'
+  3967:  'Cain Modern Auctions',
+  176:   'Rago/Wright',
+  369:   'Wright'
 };
 
 const LA_SEARCH_URL = 'https://search-party-prod.liveauctioneers.com/search/v4/web';
