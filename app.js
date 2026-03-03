@@ -39,6 +39,8 @@
   const settingsStats = document.getElementById('settings-stats');
   const loadingEl = document.getElementById('loading');
   const favBtn = document.getElementById('fav-btn');
+  const superBtn = document.getElementById('super-btn');
+  const actionBtns = document.getElementById('action-btns');
 
   // ── IndexedDB ───────────────────────────────────────────
   function openDB() {
@@ -210,12 +212,12 @@
 
     if (remaining.length === 0) {
       emptyState.classList.remove('hidden');
-      favBtn.classList.add('hidden');
+      actionBtns.classList.add('hidden');
       return;
     }
 
     emptyState.classList.add('hidden');
-    favBtn.classList.remove('hidden');
+    actionBtns.classList.remove('hidden');
 
     remaining.forEach((listing, i) => {
       const zIndex = 5 - i; // first card on top
@@ -257,7 +259,7 @@
     // Check if we're out of cards
     if (cards.length === 0) {
       emptyState.classList.remove('hidden');
-      favBtn.classList.add('hidden');
+      actionBtns.classList.add('hidden');
     }
 
     // Prefetch if running low
@@ -379,7 +381,7 @@
     }, 350);
   }
 
-  // ── Favorite button handler ──────────────────────────────
+  // ── Action button handlers ─────────────────────────────
   function handleFavButton() {
     const topCard = cardStack.querySelector('.card:not(.animating)');
     if (!topCard) return;
@@ -387,6 +389,18 @@
     const listingId = topCard.dataset.id;
     animateOut(topCard, 'up');
     recordSwipe(listingId, 'favorite');
+    addFavorite(listingId);
+  }
+
+  function handleSuperLike() {
+    const topCard = cardStack.querySelector('.card:not(.animating)');
+    if (!topCard) return;
+
+    const listingId = topCard.dataset.id;
+    // Flash the card red briefly before animating out
+    topCard.style.boxShadow = '0 0 30px rgba(239,68,68,0.5)';
+    animateOut(topCard, 'up');
+    recordSwipe(listingId, 'super_like');
     addFavorite(listingId);
   }
 
@@ -518,8 +532,9 @@
     settingsBtn.addEventListener('click', () => switchTab('settings'));
     cfgCancel.addEventListener('click', () => switchTab('scout'));
 
-    // Favorite button
+    // Action buttons
     favBtn.addEventListener('click', handleFavButton);
+    superBtn.addEventListener('click', handleSuperLike);
 
     // Load initial feed with loading spinner
     isLoading = true;

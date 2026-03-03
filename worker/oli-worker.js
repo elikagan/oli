@@ -175,7 +175,7 @@ async function handleFeed(request, url, env) {
 async function handleSwipe(request, env) {
   const { listing_id, action } = await request.json();
 
-  if (!listing_id || !['left', 'right', 'favorite'].includes(action)) {
+  if (!listing_id || !['left', 'right', 'favorite', 'super_like'].includes(action)) {
     return json({ error: 'Invalid swipe' }, 400, request);
   }
 
@@ -202,13 +202,15 @@ async function updateTasteProfile(env, embedding, action) {
   const centroidKey = side + '_centroid';
   const countKey = side + '_count';
 
+  // Super like counts as 3x weight in taste model
+  const weight = (action === 'super_like') ? 3 : 1;
+
   // Get current profile
   const res = await supa(env, 'taste_profile?id=eq.1&select=*');
   const profiles = await res.json();
   let profile = profiles[0];
 
   if (!profile) {
-    // Create initial profile
     const initial = {
       id: 1,
       positive_centroid: null,
@@ -225,15 +227,15 @@ async function updateTasteProfile(env, embedding, action) {
 
   const currentCentroid = profile[centroidKey];
   const currentCount = profile[countKey] || 0;
-  const newCount = currentCount + 1;
+  const newCount = currentCount + weight;
 
   let newCentroid;
   if (!currentCentroid) {
     newCentroid = embedding;
   } else {
-    // Running average: (old * count + new) / (count + 1)
+    // Running weighted average: (old * count + new * weight) / (count + weight)
     newCentroid = currentCentroid.map((v, i) =>
-      (v * currentCount + embedding[i]) / newCount
+      (v * currentCount + embedding[i] * weight) / newCount
     );
   }
 
