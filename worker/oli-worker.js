@@ -154,7 +154,7 @@ async function handleFeed(request, url, env) {
       ? `&id=not.in.(${[...excludeIds, ...rankedIds].join(',')})`
       : '';
     const randomRes = await supa(env,
-      `listings?status=eq.active&embedding=not.is.null${allExcludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${randomCount}`
+      `listings?status=eq.active&hero_image=not.is.null&embedding=not.is.null${allExcludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${randomCount}`
     );
     const random = await randomRes.json();
 
@@ -163,7 +163,7 @@ async function handleFeed(request, url, env) {
     // ── Cold start: fetch a big pool and shuffle to mix auction houses ──
     const poolSize = Math.min(limit * 5, 200);
     const res = await supa(env,
-      `listings?status=eq.active${excludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${poolSize}`
+      `listings?status=eq.active&hero_image=not.is.null${excludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${poolSize}`
     );
     const pool = await res.json();
     listings = shuffle(pool || []).slice(0, limit);

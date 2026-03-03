@@ -177,6 +177,17 @@
     return d.innerHTML;
   }
 
+  // Preload an image and return a promise
+  function preloadImage(url) {
+    return new Promise((resolve) => {
+      if (!url) { resolve(false); return; }
+      const img = new Image();
+      img.onload = () => resolve(true);
+      img.onerror = () => resolve(false);
+      img.src = url;
+    });
+  }
+
   function createCard(listing, zIndex) {
     const card = document.createElement('div');
     card.className = 'card';
@@ -188,8 +199,10 @@
       listing.location
     ].filter(Boolean).join(' \u00B7 ');
 
+    const heroUrl = listing.hero_image || '';
+
     card.innerHTML = `
-      <div class="card-image" style="background-image: url('${esc(listing.hero_image || '')}')">
+      <div class="card-image" style="background-color: #f0f0f0">
         <span class="card-badge">${esc(listing.platform)}</span>
         <div class="card-overlay like">LIKE</div>
         <div class="card-overlay skip">SKIP</div>
@@ -203,13 +216,36 @@
       </div>
     `;
 
+    // Load image in background, set once ready
+    if (heroUrl) {
+      preloadImage(heroUrl).then(ok => {
+        if (ok) {
+          card.querySelector('.card-image').style.backgroundImage = `url('${heroUrl}')`;
+        }
+      });
+    }
+
     return card;
+  }
+
+  // Preload images ahead in the feed so they're ready when user swipes
+  function preloadUpcoming() {
+    const start = feedIndex + 3; // beyond visible cards
+    const end = Math.min(start + 5, feed.length);
+    for (let i = start; i < end; i++) {
+      if (feed[i] && feed[i].hero_image) {
+        preloadImage(feed[i].hero_image);
+      }
+    }
   }
 
   // Build the initial 3-card stack without destroying existing cards
   function renderCards() {
     cardStack.innerHTML = '';
-    const remaining = feed.slice(feedIndex, feedIndex + 3);
+    // Skip listings with no hero_image
+    while (feedIndex < feed.length && !feed[feedIndex].hero_image) feedIndex++;
+
+    const remaining = feed.slice(feedIndex, feedIndex + 3).filter(l => l.hero_image);
 
     if (remaining.length === 0) {
       emptyState.classList.remove('hidden');
@@ -230,6 +266,7 @@
     });
 
     attachSwipeHandlers(cardStack.firstElementChild);
+    preloadUpcoming();
   }
 
   // After a swipe: just remove top card, promote others, add new card at back
@@ -262,6 +299,9 @@
       emptyState.classList.remove('hidden');
       actionBtns.classList.add('hidden');
     }
+
+    // Preload upcoming images
+    preloadUpcoming();
 
     // Prefetch if running low
     if (feed.length - feedIndex <= PREFETCH_THRESHOLD) {
