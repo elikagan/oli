@@ -25,18 +25,18 @@
 
   <!-- Swipe Screen -->
   <main id="scout-view" class="view">
+    <div id="loading" class="loading-state hidden">
+      <div class="spinner"></div>
+      <p class="loading-text">Loading listings…</p>
+    </div>
     <div id="card-stack" class="card-stack">
       <!-- Cards injected by JS -->
     </div>
     <div id="empty-state" class="empty-state hidden">
       <p>No more listings to review.</p>
-      <p class="empty-sub">Check back later or pull to refresh.</p>
+      <p class="empty-sub">Check back later for new listings.</p>
     </div>
-    <div id="swipe-hint" class="swipe-hint">
-      <span class="hint-left">&larr; Skip</span>
-      <span class="hint-fav">&starf; Investigate</span>
-      <span class="hint-right">Like &rarr;</span>
-    </div>
+    <button id="fav-btn" class="fav-btn hidden" aria-label="Favorite">&#9733;</button>
   </main>
 
   <!-- Investigate Screen -->

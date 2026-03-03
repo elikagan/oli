@@ -6,23 +6,24 @@
   const DB_STORE = 'kv';
   const BATCH_SIZE = 20;
   const PREFETCH_THRESHOLD = 5;
-  const SWIPE_THRESHOLD = 80; // px to trigger swipe
-  const SWIPE_UP_THRESHOLD = -100; // px to trigger favorite (negative = up)
-  const TILT_FACTOR = 0.15; // degrees per px of drag
+  const SWIPE_THRESHOLD = 80;
+  const SWIPE_UP_THRESHOLD = -100;
+  const TILT_FACTOR = 0.15;
 
   // ── State ───────────────────────────────────────────────
-  let config = {
+  const config = {
     workerUrl: 'https://oli-api.objectlesson.workers.dev',
     supaUrl: 'https://zscgcppjkfhaqchjxqkm.supabase.co',
     supaKey: 'sb_publishable_B9lLQBVV-D-Z5d1dEk7uAg_kaYB_13B'
   };
-  let feed = [];           // current batch of listings
-  let feedIndex = 0;       // current card index in feed
-  let favorites = [];      // investigate list
-  let swipedIds = new Set(); // already-swiped listing IDs (session)
+  let feed = [];
+  let feedIndex = 0;
+  let favorites = [];
+  let swipedIds = new Set();
   let currentTab = 'scout';
   let isDragging = false;
   let startX = 0, startY = 0, deltaX = 0, deltaY = 0;
+  let isLoading = false;
 
   // ── DOM refs ────────────────────────────────────────────
   const scoutView = document.getElementById('scout-view');
@@ -30,13 +31,14 @@
   const settingsView = document.getElementById('settings-view');
   const cardStack = document.getElementById('card-stack');
   const emptyState = document.getElementById('empty-state');
-  const swipeHint = document.getElementById('swipe-hint');
   const favList = document.getElementById('fav-list');
   const favEmpty = document.getElementById('fav-empty');
   const tabbar = document.getElementById('tabbar');
   const settingsBtn = document.getElementById('settings-btn');
   const cfgCancel = document.getElementById('cfg-cancel');
   const settingsStats = document.getElementById('settings-stats');
+  const loadingEl = document.getElementById('loading');
+  const favBtn = document.getElementById('fav-btn');
 
   // ── IndexedDB ───────────────────────────────────────────
   function openDB() {
@@ -68,8 +70,25 @@
     });
   }
 
-  // ── Config ──────────────────────────────────────────────
-  // Config is hardcoded — single-user app, no settings form needed
+  // ── Swiped ID persistence ─────────────────────────────
+  async function loadSwipedIds() {
+    try {
+      const saved = await dbGet('swipedIds');
+      if (saved && Array.isArray(saved)) {
+        swipedIds = new Set(saved);
+      }
+    } catch (e) {
+      console.warn('Failed to load swiped IDs:', e);
+    }
+  }
+
+  async function saveSwipedIds() {
+    try {
+      await dbSet('swipedIds', [...swipedIds]);
+    } catch (e) {
+      console.warn('Failed to save swiped IDs:', e);
+    }
+  }
 
   // ── API Calls ───────────────────────────────────────────
   async function apiFetch(path, opts = {}) {
@@ -99,6 +118,7 @@
 
   async function recordSwipe(listingId, action) {
     swipedIds.add(listingId);
+    saveSwipedIds(); // persist to IndexedDB (fire and forget)
     try {
       await apiFetch('/swipe', {
         method: 'POST',
@@ -154,11 +174,11 @@
     return d.innerHTML;
   }
 
-  function createCard(listing, index) {
+  function createCard(listing, zIndex) {
     const card = document.createElement('div');
     card.className = 'card';
     card.dataset.id = listing.id;
-    card.dataset.index = index;
+    card.style.zIndex = zIndex;
 
     const meta = [
       listing.auction_house || listing.platform,
@@ -170,7 +190,7 @@
         <span class="card-badge">${esc(listing.platform)}</span>
         <div class="card-overlay like">LIKE</div>
         <div class="card-overlay skip">SKIP</div>
-        <div class="card-overlay fav">&starf;</div>
+        <div class="card-overlay fav">\u2605</div>
       </div>
       <div class="card-info">
         <div class="card-title">${esc(listing.title)}</div>
@@ -183,31 +203,72 @@
     return card;
   }
 
+  // Build the initial 3-card stack without destroying existing cards
   function renderCards() {
     cardStack.innerHTML = '';
     const remaining = feed.slice(feedIndex, feedIndex + 3);
 
     if (remaining.length === 0) {
       emptyState.classList.remove('hidden');
-      swipeHint.classList.add('hidden');
+      favBtn.classList.add('hidden');
       return;
     }
 
     emptyState.classList.add('hidden');
-    swipeHint.classList.remove('hidden');
+    favBtn.classList.remove('hidden');
 
     remaining.forEach((listing, i) => {
-      const card = createCard(listing, feedIndex + i);
+      const zIndex = 5 - i; // first card on top
+      const card = createCard(listing, zIndex);
+      // Scale down cards behind
+      if (i === 1) card.style.transform = 'scale(0.96) translateY(8px)';
+      if (i === 2) card.style.transform = 'scale(0.92) translateY(16px)';
       cardStack.appendChild(card);
     });
 
     attachSwipeHandlers(cardStack.firstElementChild);
   }
 
+  // After a swipe: just remove top card, promote others, add new card at back
+  function advanceCard() {
+    feedIndex++;
+
+    // Promote remaining cards
+    const cards = cardStack.querySelectorAll('.card:not(.animating)');
+    cards.forEach((card, i) => {
+      card.style.zIndex = 5 - i;
+      card.style.transition = 'transform 0.25s ease-out';
+      if (i === 0) {
+        card.style.transform = '';
+        attachSwipeHandlers(card);
+      } else if (i === 1) {
+        card.style.transform = 'scale(0.96) translateY(8px)';
+      }
+    });
+
+    // Add next card at back of stack if available
+    const nextIdx = feedIndex + cards.length;
+    if (nextIdx < feed.length) {
+      const card = createCard(feed[nextIdx], 5 - cards.length);
+      card.style.transform = 'scale(0.92) translateY(16px)';
+      cardStack.appendChild(card);
+    }
+
+    // Check if we're out of cards
+    if (cards.length === 0) {
+      emptyState.classList.remove('hidden');
+      favBtn.classList.add('hidden');
+    }
+
+    // Prefetch if running low
+    if (feed.length - feedIndex <= PREFETCH_THRESHOLD) {
+      loadMoreFeed();
+    }
+  }
+
   // ── Swipe Gesture Handling ──────────────────────────────
   function attachSwipeHandlers(card) {
     if (!card) return;
-
     card.addEventListener('pointerdown', onPointerDown);
     card.addEventListener('pointermove', onPointerMove);
     card.addEventListener('pointerup', onPointerUp);
@@ -236,7 +297,6 @@
     card.style.transition = 'none';
     card.style.transform = `translate(${deltaX}px, ${deltaY}px) rotate(${rotation}deg)`;
 
-    // Show overlay indicators
     const likeOverlay = card.querySelector('.card-overlay.like');
     const skipOverlay = card.querySelector('.card-overlay.skip');
     const favOverlay = card.querySelector('.card-overlay.fav');
@@ -272,7 +332,6 @@
 
     const listingId = card.dataset.id;
 
-    // Determine action
     if (deltaX > SWIPE_THRESHOLD) {
       animateOut(card, 'right');
       recordSwipe(listingId, 'right');
@@ -297,7 +356,14 @@
   }
 
   function animateOut(card, direction) {
+    // Remove pointer handlers so they can't fire again
+    card.removeEventListener('pointerdown', onPointerDown);
+    card.removeEventListener('pointermove', onPointerMove);
+    card.removeEventListener('pointerup', onPointerUp);
+    card.removeEventListener('pointercancel', onPointerUp);
+
     card.classList.add('animating');
+    card.style.transition = 'transform 0.35s ease-out, opacity 0.35s ease-out';
 
     const offX = direction === 'right' ? window.innerWidth * 1.5 :
                  direction === 'left' ? -window.innerWidth * 1.5 : 0;
@@ -308,14 +374,20 @@
     card.style.opacity = '0';
 
     setTimeout(() => {
-      feedIndex++;
-      renderCards();
-
-      // Prefetch if running low
-      if (feed.length - feedIndex <= PREFETCH_THRESHOLD) {
-        loadMoreFeed();
-      }
+      card.remove(); // just remove the swiped card from DOM
+      advanceCard(); // promote remaining cards, no rebuild
     }, 350);
+  }
+
+  // ── Favorite button handler ──────────────────────────────
+  function handleFavButton() {
+    const topCard = cardStack.querySelector('.card:not(.animating)');
+    if (!topCard) return;
+
+    const listingId = topCard.dataset.id;
+    animateOut(topCard, 'up');
+    recordSwipe(listingId, 'favorite');
+    addFavorite(listingId);
   }
 
   async function loadMoreFeed() {
@@ -323,6 +395,22 @@
     if (more.length > 0) {
       feed = feed.concat(more);
     }
+  }
+
+  // ── Pull to Refresh ───────────────────────────────────
+  async function refreshFeed() {
+    if (isLoading) return;
+    isLoading = true;
+    loadingEl.classList.remove('hidden');
+    cardStack.innerHTML = '';
+    emptyState.classList.add('hidden');
+
+    feedIndex = 0;
+    feed = await fetchFeed();
+    renderCards();
+
+    loadingEl.classList.add('hidden');
+    isLoading = false;
   }
 
   // ── Investigate List ────────────────────────────────────
@@ -356,7 +444,6 @@
       `;
     }).join('');
 
-    // Remove handlers
     favList.querySelectorAll('.remove-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const favId = btn.dataset.favId;
@@ -377,9 +464,8 @@
 
     if (tab === 'scout') {
       scoutView.classList.remove('hidden');
-      // Load feed if empty (e.g., after first config save)
       if (feed.length === 0 && config.workerUrl) {
-        fetchFeed().then(data => { feed = data; renderCards(); });
+        refreshFeed();
       }
     } else if (tab === 'investigate') {
       investigateView.classList.remove('hidden');
@@ -415,10 +501,12 @@
 
   // ── Init ────────────────────────────────────────────────
   async function init() {
-    // Register service worker
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
+
+    // Load persisted swiped IDs so we don't show dupes across sessions/devices
+    await loadSwipedIds();
 
     // Tab bar navigation
     tabbar.addEventListener('click', e => {
@@ -430,9 +518,18 @@
     settingsBtn.addEventListener('click', () => switchTab('settings'));
     cfgCancel.addEventListener('click', () => switchTab('scout'));
 
-    // Load initial feed — config is hardcoded, go straight to swiping
+    // Favorite button
+    favBtn.addEventListener('click', handleFavButton);
+
+    // Load initial feed with loading spinner
+    isLoading = true;
+    loadingEl.classList.remove('hidden');
+
     feed = await fetchFeed();
     renderCards();
+
+    loadingEl.classList.add('hidden');
+    isLoading = false;
   }
 
   init();

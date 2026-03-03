@@ -94,8 +94,8 @@ body {
   position: relative;
   width: calc(100% - 24px);
   max-width: 420px;
-  height: 75vh;
-  max-height: 640px;
+  height: 70vh;
+  max-height: 580px;
 }
 
 .card {
@@ -113,27 +113,11 @@ body {
   cursor: grab;
   touch-action: none;
   user-select: none;
-  transition: transform 0.08s ease-out, opacity 0.08s ease-out;
   will-change: transform;
 }
 
 .card.animating {
-  transition: transform 0.35s ease-out, opacity 0.35s ease-out;
   pointer-events: none;
-}
-
-.card:nth-child(2) {
-  transform: scale(0.96) translateY(8px);
-  z-index: 1;
-}
-
-.card:nth-child(3) {
-  transform: scale(0.92) translateY(16px);
-  z-index: 0;
-}
-
-.card:first-child {
-  z-index: 5;
 }
 
 .card-image {
@@ -218,31 +202,10 @@ body {
   gap: 8px;
 }
 
-.card-meta .dot {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--light);
-}
-
-/* Swipe Indicators */
-
-.swipe-indicator {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 100%;
-  pointer-events: none;
-  z-index: 6;
-}
-
 /* --- Favorite Button --- */
 
 .fav-btn {
-  position: absolute;
-  bottom: 90px;
-  left: 50%;
-  transform: translateX(-50%);
+  margin-top: 12px;
   z-index: 10;
   background: var(--card-bg);
   border: 2px solid var(--border);
@@ -253,29 +216,33 @@ body {
   align-items: center;
   justify-content: center;
   font-size: 22px;
+  color: var(--gray);
   cursor: pointer;
   transition: all 0.15s;
   box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+  flex-shrink: 0;
 }
 
 .fav-btn:active {
-  transform: translateX(-50%) scale(0.9);
+  transform: scale(0.9);
   border-color: #f59e0b;
   color: #f59e0b;
 }
 
-/* --- Swipe Hints --- */
+/* --- Loading State --- */
 
-.swipe-hint {
+.loading-state {
   display: flex;
-  justify-content: space-between;
-  width: calc(100% - 32px);
-  max-width: 400px;
-  padding: 12px 4px 0;
-  font-size: 11px;
-  color: var(--light);
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 60vh;
+}
+
+.loading-text {
+  font-size: 14px;
+  color: var(--gray);
+  margin-top: 8px;
 }
 
 /* --- Empty State --- */
@@ -410,81 +377,7 @@ body {
   padding: 0 20px;
 }
 
-.settings-form label {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--gray);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 16px;
-}
-
-.settings-form input {
-  display: block;
-  width: 100%;
-  margin-top: 6px;
-  padding: 10px 12px;
-  font-size: 14px;
-  font-family: var(--font);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--card-bg);
-  color: var(--black);
-  outline: none;
-  transition: border-color 0.15s;
-}
-
-.settings-form input:focus {
-  border-color: var(--black);
-}
-
-.settings-actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 8px;
-}
-
-.btn-primary {
-  flex: 1;
-  padding: 12px;
-  font-size: 14px;
-  font-weight: 600;
-  font-family: var(--font);
-  border: none;
-  border-radius: 8px;
-  background: var(--black);
-  color: #fff;
-  cursor: pointer;
-  transition: opacity 0.15s;
-}
-
-.btn-primary:active { opacity: 0.8; }
-
-.btn-secondary {
-  flex: 1;
-  padding: 12px;
-  font-size: 14px;
-  font-weight: 500;
-  font-family: var(--font);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--card-bg);
-  color: var(--dark);
-  cursor: pointer;
-}
-
-.cfg-status {
-  margin-top: 12px;
-  font-size: 13px;
-  color: var(--gray);
-  text-align: center;
-}
-
 .settings-stats {
-  margin-top: 24px;
-  padding-top: 20px;
-  border-top: 1px solid var(--border);
   font-size: 13px;
   color: var(--gray);
 }
@@ -497,6 +390,18 @@ body {
 
 .stat-label { font-weight: 500; }
 .stat-val { font-weight: 600; color: var(--black); }
+
+.btn-secondary {
+  padding: 12px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: var(--font);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--dark);
+  cursor: pointer;
+}
 
 /* --- Bottom Tab Bar --- */
 
@@ -544,7 +449,6 @@ body {
   border-top-color: var(--black);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
-  margin: 20px auto;
 }
 
 @keyframes spin {
