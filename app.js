@@ -40,6 +40,7 @@
   const loadingEl = document.getElementById('loading');
   const favBtn = document.getElementById('fav-btn');
   const superBtn = document.getElementById('super-btn');
+  const hateBtn = document.getElementById('hate-btn');
   const actionBtns = document.getElementById('action-btns');
 
   // ── IndexedDB ───────────────────────────────────────────
@@ -397,11 +398,20 @@
     if (!topCard) return;
 
     const listingId = topCard.dataset.id;
-    // Flash the card red briefly before animating out
     topCard.style.boxShadow = '0 0 30px rgba(239,68,68,0.5)';
     animateOut(topCard, 'up');
     recordSwipe(listingId, 'super_like');
     addFavorite(listingId);
+  }
+
+  function handleSuperHate() {
+    const topCard = cardStack.querySelector('.card:not(.animating)');
+    if (!topCard) return;
+
+    const listingId = topCard.dataset.id;
+    topCard.style.boxShadow = '0 0 30px rgba(0,0,0,0.4)';
+    animateOut(topCard, 'left');
+    recordSwipe(listingId, 'super_hate');
   }
 
   async function loadMoreFeed() {
@@ -533,6 +543,7 @@
     cfgCancel.addEventListener('click', () => switchTab('scout'));
 
     // Action buttons
+    hateBtn.addEventListener('click', handleSuperHate);
     favBtn.addEventListener('click', handleFavButton);
     superBtn.addEventListener('click', handleSuperLike);
 

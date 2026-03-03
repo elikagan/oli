@@ -186,7 +186,7 @@ function shuffle(arr) {
 async function handleSwipe(request, env) {
   const { listing_id, action } = await request.json();
 
-  if (!listing_id || !['left', 'right', 'favorite', 'super_like'].includes(action)) {
+  if (!listing_id || !['left', 'right', 'favorite', 'super_like', 'super_hate'].includes(action)) {
     return json({ error: 'Invalid swipe' }, 400, request);
   }
 
@@ -209,12 +209,12 @@ async function handleSwipe(request, env) {
 // ── Taste Profile Update ──────────────────────────────────
 
 async function updateTasteProfile(env, embedding, action) {
-  const side = (action === 'left') ? 'negative' : 'positive';
+  const side = (action === 'left' || action === 'super_hate') ? 'negative' : 'positive';
   const centroidKey = side + '_centroid';
   const countKey = side + '_count';
 
-  // Super like counts as 3x weight in taste model
-  const weight = (action === 'super_like') ? 3 : 1;
+  // Super like/hate count as 3x weight in taste model
+  const weight = (action === 'super_like' || action === 'super_hate') ? 3 : 1;
 
   // Get current profile
   const res = await supa(env, 'taste_profile?id=eq.1&select=*');

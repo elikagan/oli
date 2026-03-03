@@ -239,6 +239,12 @@ body {
   border-color: #ef4444;
 }
 
+.hate-btn:active {
+  transform: scale(0.9);
+  border-color: #1a1a1a;
+  color: #1a1a1a;
+}
+
 /* --- Loading State --- */
 
 .loading-state {
