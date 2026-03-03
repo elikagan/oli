@@ -38,6 +38,9 @@ export default {
       if (url.pathname === '/stats' && request.method === 'GET')
         return handleStats(request, env);
 
+      if (url.pathname === '/fix-houses' && request.method === 'POST')
+        return handleFixHouses(request, env);
+
       return new Response('Not found', { status: 404, headers: corsHeaders(request) });
     } catch (e) {
       console.error('Worker error:', e);
@@ -315,6 +318,19 @@ async function handleStats(request, env) {
     favorites_count: favCount,
     active_listings: listingCount
   }, 200, request);
+}
+
+// ── POST /fix-houses ─────────────────────────────────────
+
+async function handleFixHouses(request, env) {
+  // Fix listings with auction_house = 'Unknown' → 'Rago' (all from seller 176 batch)
+  const res = await supa(env, "listings?auction_house=eq.Unknown", {
+    method: 'PATCH',
+    body: JSON.stringify({ auction_house: 'Rago' }),
+    headers: { 'Prefer': 'return=representation' }
+  });
+  const fixed = await res.json();
+  return json({ ok: true, fixed: Array.isArray(fixed) ? fixed.length : 0 }, 200, request);
 }
 
 // ── POST /scrape ──────────────────────────────────────────
