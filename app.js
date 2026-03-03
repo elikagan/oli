@@ -11,7 +11,11 @@
   const TILT_FACTOR = 0.15; // degrees per px of drag
 
   // ── State ───────────────────────────────────────────────
-  let config = { workerUrl: '', supaUrl: '', supaKey: '' };
+  let config = {
+    workerUrl: 'https://oli-api.objectlesson.workers.dev',
+    supaUrl: 'https://zscgcppjkfhaqchjxqkm.supabase.co',
+    supaKey: 'sb_publishable_B9lLQBVV-D-Z5d1dEk7uAg_kaYB_13B'
+  };
   let feed = [];           // current batch of listings
   let feedIndex = 0;       // current card index in feed
   let favorites = [];      // investigate list
@@ -31,9 +35,7 @@
   const favEmpty = document.getElementById('fav-empty');
   const tabbar = document.getElementById('tabbar');
   const settingsBtn = document.getElementById('settings-btn');
-  const cfgSave = document.getElementById('cfg-save');
   const cfgCancel = document.getElementById('cfg-cancel');
-  const cfgStatus = document.getElementById('cfg-status');
   const settingsStats = document.getElementById('settings-stats');
 
   // ── IndexedDB ───────────────────────────────────────────
@@ -66,34 +68,8 @@
     });
   }
 
-  // ── Config Load/Save ────────────────────────────────────
-  async function loadConfig() {
-    try {
-      const saved = await dbGet('config');
-      if (saved) config = { ...config, ...saved };
-    } catch (e) {
-      console.warn('Config load failed:', e);
-    }
-  }
-
-  async function saveConfig() {
-    const workerUrl = document.getElementById('cfg-worker-url').value.trim();
-    const supaUrl = document.getElementById('cfg-supa-url').value.trim();
-    const supaKey = document.getElementById('cfg-supa-key').value.trim();
-    config = { workerUrl, supaUrl, supaKey };
-    await dbSet('config', config);
-    cfgStatus.textContent = 'Saved.';
-    setTimeout(() => {
-      cfgStatus.textContent = '';
-      switchTab('scout');
-    }, 500);
-  }
-
-  function populateSettings() {
-    document.getElementById('cfg-worker-url').value = config.workerUrl || '';
-    document.getElementById('cfg-supa-url').value = config.supaUrl || '';
-    document.getElementById('cfg-supa-key').value = config.supaKey || '';
-  }
+  // ── Config ──────────────────────────────────────────────
+  // Config is hardcoded — single-user app, no settings form needed
 
   // ── API Calls ───────────────────────────────────────────
   async function apiFetch(path, opts = {}) {
@@ -410,7 +386,6 @@
       loadFavorites();
     } else if (tab === 'settings') {
       settingsView.classList.remove('hidden');
-      populateSettings();
       loadStats();
     }
 
@@ -442,11 +417,8 @@
   async function init() {
     // Register service worker
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
-
-    // Load config
-    await loadConfig();
 
     // Tab bar navigation
     tabbar.addEventListener('click', e => {
@@ -456,17 +428,9 @@
 
     // Settings
     settingsBtn.addEventListener('click', () => switchTab('settings'));
-    cfgSave.addEventListener('click', saveConfig);
     cfgCancel.addEventListener('click', () => switchTab('scout'));
 
-    // Check if configured
-    if (!config.workerUrl) {
-      switchTab('settings');
-      cfgStatus.textContent = 'Configure your Worker URL to get started.';
-      return;
-    }
-
-    // Load initial feed
+    // Load initial feed — config is hardcoded, go straight to swiping
     feed = await fetchFeed();
     renderCards();
   }
