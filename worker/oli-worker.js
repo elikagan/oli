@@ -325,10 +325,18 @@ async function scrapeAll(env) {
 
 // LiveAuctioneers seller IDs for tracked auction houses
 const LA_SELLERS = {
+  // Primary sources
   5004:  'Hughes Estate Sales',
   1285:  'Abell Auction',
   6110:  'Redlands Antique Auction',
-  10356: "Salon d'Marquis"
+  10356: "Salon d'Marquis",
+  // Additional houses
+  237:   'Los Angeles Modern Auctions',
+  3822:  'BILLINGS',
+  7732:  'Catalog Projects',
+  8902:  'Circa Auction',
+  390:   'Uniques and Antiques, Inc.',
+  3967:  'Cain Modern Auctions'
 };
 
 const LA_SEARCH_URL = 'https://search-party-prod.liveauctioneers.com/search/v4/web';
@@ -364,7 +372,7 @@ async function scrapeSellerListings(env, sellerId, houseName) {
       distance: {},
       options: {
         status: ['upcoming', 'live', 'online'],
-        auctionHouse: { exclude: [], include: [sellerId] }
+        auctionHouse: [{ exclude: [], include: [sellerId] }]
       },
       page,
       pageSize: 24,
