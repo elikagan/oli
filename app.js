@@ -356,9 +356,9 @@
       likeOverlay.style.opacity = 0;
       favOverlay.style.opacity = 0;
     } else if (deltaY < -20) {
-      favOverlay.style.opacity = yProgress;
+      skipOverlay.style.opacity = yProgress;
       likeOverlay.style.opacity = 0;
-      skipOverlay.style.opacity = 0;
+      favOverlay.style.opacity = 0;
     } else {
       likeOverlay.style.opacity = 0;
       skipOverlay.style.opacity = 0;
@@ -383,8 +383,7 @@
       recordSwipe(listingId, 'left');
     } else if (deltaY < SWIPE_UP_THRESHOLD) {
       animateOut(card, 'up');
-      recordSwipe(listingId, 'favorite');
-      addFavorite(listingId);
+      recordSwipe(listingId, 'left');
     } else {
       // Snap back
       card.style.transition = 'transform 0.3s ease-out';
