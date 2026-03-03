@@ -83,7 +83,10 @@
     config = { workerUrl, supaUrl, supaKey };
     await dbSet('config', config);
     cfgStatus.textContent = 'Saved.';
-    setTimeout(() => { cfgStatus.textContent = ''; }, 2000);
+    setTimeout(() => {
+      cfgStatus.textContent = '';
+      switchTab('scout');
+    }, 500);
   }
 
   function populateSettings() {
@@ -398,6 +401,10 @@
 
     if (tab === 'scout') {
       scoutView.classList.remove('hidden');
+      // Load feed if empty (e.g., after first config save)
+      if (feed.length === 0 && config.workerUrl) {
+        fetchFeed().then(data => { feed = data; renderCards(); });
+      }
     } else if (tab === 'investigate') {
       investigateView.classList.remove('hidden');
       loadFavorites();
