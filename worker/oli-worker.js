@@ -323,18 +323,150 @@ async function scrapeAll(env) {
   return total;
 }
 
+// LiveAuctioneers seller IDs for tracked auction houses
+const LA_SELLERS = {
+  5004:  'Hughes Estate Sales',
+  1285:  'Abell Auction',
+  6110:  'Redlands Antique Auction',
+  10356: "Salon d'Marquis"
+};
+
+const LA_SEARCH_URL = 'https://search-party-prod.liveauctioneers.com/search/v4/web';
+const LA_IMAGE_BASE = 'https://p1.liveauctioneers.com';
+
 async function scrapeLiveAuctioneers(env) {
-  // TODO: Implement once we reverse-engineer the LA API
-  // For now, return 0. We'll seed data manually first.
-  //
-  // The approach:
-  // 1. Hit api.liveauctioneers.com search endpoint
-  // 2. Filter by auctioneer IDs: Hughes, Abells, Redlands, Salon de Marquis
-  // 3. Parse lot data: title, description, images, estimates, auction dates
-  // 4. Upsert into Supabase listings table
-  //
-  console.log('[OLI] LiveAuctioneers scraper: not yet implemented');
-  return 0;
+  let totalNew = 0;
+
+  for (const [sellerId, houseName] of Object.entries(LA_SELLERS)) {
+    try {
+      const count = await scrapeSellerListings(env, parseInt(sellerId), houseName);
+      totalNew += count;
+      console.log(`[OLI] ${houseName}: ${count} new listings`);
+    } catch (e) {
+      console.error(`[OLI] Failed to scrape ${houseName}:`, e);
+    }
+    // Small delay between houses
+    await sleep(1000);
+  }
+
+  return totalNew;
+}
+
+async function scrapeSellerListings(env, sellerId, houseName) {
+  let totalNew = 0;
+  let page = 1;
+  const maxPages = 10; // Safety limit
+
+  while (page <= maxPages) {
+    const params = {
+      analyticsTags: ['web'],
+      categories: [],
+      distance: {},
+      options: {
+        status: ['upcoming', 'live', 'online'],
+        auctionHouse: { exclude: [], include: [sellerId] }
+      },
+      page,
+      pageSize: 24,
+      publishDate: {},
+      ranges: {},
+      saleDate: {},
+      searchTerm: '',
+      citySlug: '',
+      region: '',
+      sort: '-relevance',
+      seoSearch: false
+    };
+
+    const url = `${LA_SEARCH_URL}?parameters=${encodeURIComponent(JSON.stringify(params))}&skipAggs=true`;
+
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!res.ok) {
+      console.error(`[OLI] LA search failed: ${res.status}`);
+      break;
+    }
+
+    const data = await res.json();
+    const items = data?.payload?.items || [];
+
+    if (items.length === 0) break;
+
+    // Transform and upsert each item
+    for (const item of items) {
+      const inserted = await upsertLAListing(env, item, sellerId, houseName);
+      if (inserted) totalNew++;
+    }
+
+    // Check if more pages
+    const totalPages = data?.payload?.totalPages || 0;
+    if (page >= totalPages) break;
+    page++;
+
+    await sleep(500);
+  }
+
+  return totalNew;
+}
+
+function buildLAImageUrl(sellerId, catalogId, itemId, photoIndex, imageVersion) {
+  return `${LA_IMAGE_BASE}/${sellerId}/${catalogId}/${itemId}_${photoIndex}_x.jpg?height=600&quality=95&version=${imageVersion || ''}`;
+}
+
+async function upsertLAListing(env, item, sellerId, houseName) {
+  const platformId = String(item.itemId);
+
+  // Build image URLs from photos array
+  const photos = item.photos || [1];
+  const imageUrls = photos.map(p =>
+    buildLAImageUrl(sellerId, item.catalogId, item.itemId, p, item.imageVersion)
+  );
+
+  const location = [item.sellerCity, item.sellerStateCode].filter(Boolean).join(', ');
+  const lotUrl = `https://www.liveauctioneers.com/item/${item.itemId}`;
+
+  // Use low estimate as price, fall back to start price
+  const price = item.lowBidEstimate || item.startPrice || null;
+
+  // Convert sale start timestamp to ISO date
+  const auctionDate = item.saleStartTs
+    ? new Date(item.saleStartTs * 1000).toISOString()
+    : null;
+
+  const listing = {
+    platform: 'liveauctioneers',
+    platform_id: platformId,
+    title: item.title || 'Untitled',
+    description: item.shortDescription || '',
+    price,
+    currency: item.currency || 'USD',
+    location,
+    url: lotUrl,
+    image_urls: imageUrls,
+    hero_image: imageUrls[0] || null,
+    auction_house: houseName,
+    auction_date: auctionDate,
+    lot_number: item.lotNumber || null,
+    status: 'active'
+  };
+
+  // Upsert (insert or skip if exists)
+  const res = await supa(env, 'listings', {
+    method: 'POST',
+    body: JSON.stringify(listing),
+    headers: {
+      'Prefer': 'return=representation,resolution=ignore-duplicates'
+    }
+  });
+
+  const result = await res.json();
+  // If result array has an item, it was inserted (new)
+  return Array.isArray(result) && result.length > 0;
 }
 
 async function scrapeCraigslist(env) {
