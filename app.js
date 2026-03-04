@@ -342,15 +342,21 @@
       cardStack.appendChild(card);
     }
 
-    if (cards.length === 0) {
-      emptyState.classList.remove('hidden');
-      actionBtns.classList.add('hidden');
-    }
-
     preloadUpcoming();
 
+    // Auto-fetch when running low or out of cards
     if (feed.length - feedIndex <= PREFETCH_THRESHOLD) {
-      loadMoreFeed();
+      loadMoreFeed().then(() => {
+        // If we ran out and got more, re-render
+        if (cards.length === 0 && feed.length > feedIndex) {
+          renderCards();
+        }
+      });
+    }
+
+    if (cards.length === 0 && feed.length <= feedIndex) {
+      emptyState.classList.remove('hidden');
+      actionBtns.classList.add('hidden');
     }
   }
 
@@ -504,19 +510,47 @@
   }
 
   // ── Pull to Refresh ───────────────────────────────────
-  async function refreshFeed() {
-    if (isLoading) return;
-    isLoading = true;
-    loadingEl.classList.remove('hidden');
-    cardStack.innerHTML = '';
-    emptyState.classList.add('hidden');
+  let pullStartY = 0;
+  let isPulling = false;
+  let pullTriggered = false;
+  const PULL_THRESHOLD = 60;
 
-    feedIndex = 0;
-    feed = await fetchFeed();
-    renderCards();
+  function initPullToRefresh() {
+    // Listen on the whole document so it works even over the empty state
+    document.addEventListener('touchstart', (e) => {
+      if (currentTab !== 'scout') return;
+      if (e.target.closest('.card') || e.target.closest('.action-btn') || e.target.closest('#tabbar') || e.target.closest('#topbar')) return;
+      pullStartY = e.touches[0].clientY;
+      isPulling = true;
+      pullTriggered = false;
+    }, { passive: true });
 
-    loadingEl.classList.add('hidden');
-    isLoading = false;
+    document.addEventListener('touchmove', (e) => {
+      if (!isPulling || currentTab !== 'scout') return;
+      const dy = e.touches[0].clientY - pullStartY;
+      if (dy > 10) {
+        const progress = Math.min(dy / PULL_THRESHOLD, 1);
+        loadingEl.classList.remove('hidden');
+        loadingEl.style.opacity = String(progress * 0.8 + 0.2);
+        loadingEl.style.transform = `scale(${0.6 + progress * 0.4})`;
+        if (progress >= 1) pullTriggered = true;
+      }
+    }, { passive: true });
+
+    document.addEventListener('touchend', async () => {
+      if (!isPulling) return;
+      isPulling = false;
+
+      if (pullTriggered && currentTab === 'scout') {
+        loadingEl.style.opacity = '';
+        loadingEl.style.transform = '';
+        await doRefresh();
+      } else {
+        loadingEl.classList.add('hidden');
+        loadingEl.style.opacity = '';
+        loadingEl.style.transform = '';
+      }
+    });
   }
 
   // ── Hamburger Menu ────────────────────────────────────
@@ -536,8 +570,21 @@
       switchTab('settings');
     } else if (action === 'refresh') {
       if (currentTab !== 'scout') switchTab('scout');
-      refreshFeed();
+      doRefresh();
     }
+  }
+
+  async function doRefresh() {
+    loadingEl.classList.remove('hidden');
+    loadingEl.style.opacity = '';
+    loadingEl.style.transform = '';
+    cardStack.innerHTML = '';
+    emptyState.classList.add('hidden');
+    actionBtns.classList.add('hidden');
+    feedIndex = 0;
+    feed = await fetchFeed();
+    renderCards();
+    loadingEl.classList.add('hidden');
   }
 
   // ── Investigate List ────────────────────────────────────
@@ -753,7 +800,7 @@
     if (tab === 'scout') {
       scoutView.classList.remove('hidden');
       if (feed.length === 0 && config.workerUrl) {
-        refreshFeed();
+        loadMoreFeed().then(() => { if (feed.length) renderCards(); });
       }
     } else if (tab === 'investigate') {
       investigateView.classList.remove('hidden');
@@ -857,15 +904,14 @@
     favBtn.addEventListener('click', handleFavButton);
     superBtn.addEventListener('click', handleSuperLike);
 
+    // Pull to refresh
+    initPullToRefresh();
+
     // Load initial feed
-    isLoading = true;
     loadingEl.classList.remove('hidden');
-
     feed = await fetchFeed();
-    renderCards();
-
     loadingEl.classList.add('hidden');
-    isLoading = false;
+    renderCards();
   }
 
   init();

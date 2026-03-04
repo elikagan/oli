@@ -27,6 +27,7 @@ body {
   overflow: hidden;
   position: fixed;
   width: 100%;
+  overscroll-behavior: none;
 }
 
 .hidden { display: none !important; }
