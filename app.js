@@ -908,52 +908,57 @@
 
   // ── Init ────────────────────────────────────────────────
   async function init() {
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(() => {});
-    }
-
-    await loadSwipedIds();
-
-    // Tab bar navigation
-    tabbar.addEventListener('click', e => {
-      const tab = e.target.closest('.tab');
-      if (tab) switchTab(tab.dataset.tab);
-    });
-
-    // Hamburger menu
-    menuBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleMenu();
-    });
-
-    menuDropdown.addEventListener('click', (e) => {
-      const item = e.target.closest('.menu-item');
-      if (item) handleMenuAction(item.dataset.action);
-    });
-
-    // Close menu on outside click
-    document.addEventListener('click', (e) => {
-      if (menuOpen && !e.target.closest('.menu-wrap')) {
-        closeMenu();
+    try {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
       }
-    });
 
-    // Settings back button
-    cfgCancel.addEventListener('click', () => switchTab('scout'));
+      await loadSwipedIds();
 
-    // Action buttons
-    hateBtn.addEventListener('click', handleSuperHate);
-    favBtn.addEventListener('click', handleFavButton);
-    superBtn.addEventListener('click', handleSuperLike);
+      // Tab bar navigation
+      tabbar.addEventListener('click', e => {
+        const tab = e.target.closest('.tab');
+        if (tab) switchTab(tab.dataset.tab);
+      });
 
-    // Pull to refresh
-    initPullToRefresh();
+      // Hamburger menu
+      menuBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleMenu();
+      });
 
-    // Load initial feed
-    loadingEl.classList.remove('hidden');
-    feed = await fetchFeed();
-    loadingEl.classList.add('hidden');
-    renderCards();
+      menuDropdown.addEventListener('click', (e) => {
+        const item = e.target.closest('.menu-item');
+        if (item) handleMenuAction(item.dataset.action);
+      });
+
+      // Close menu on outside click
+      document.addEventListener('click', (e) => {
+        if (menuOpen && !e.target.closest('.menu-wrap')) {
+          closeMenu();
+        }
+      });
+
+      // Settings back button
+      cfgCancel.addEventListener('click', () => switchTab('scout'));
+
+      // Action buttons
+      hateBtn.addEventListener('click', handleSuperHate);
+      favBtn.addEventListener('click', handleFavButton);
+      superBtn.addEventListener('click', handleSuperLike);
+
+      // Pull to refresh
+      initPullToRefresh();
+
+      // Load initial feed
+      loadingEl.classList.remove('hidden');
+      feed = await fetchFeed();
+      console.log('Feed loaded:', feed.length, 'listings');
+      loadingEl.classList.add('hidden');
+      renderCards();
+    } catch (e) {
+      console.error('Init failed:', e);
+    }
   }
 
   init();
