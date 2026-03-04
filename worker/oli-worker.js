@@ -461,14 +461,25 @@ async function handleStats(request, env) {
   // Prediction accuracy: analyze scored swipes
   let accuracy = null;
   try {
-    const scoredRes = await supa(env, 'swipes?predicted_score=not.is.null&select=action,predicted_score&order=created_at.desc&limit=200');
-    const scored = await scoredRes.json();
-    if (Array.isArray(scored) && scored.length >= 10) {
+    const scoredRes = await supa(env, 'swipes?predicted_score=not.is.null&select=listing_id,action,predicted_score&order=created_at.desc&limit=500');
+    const scoredRaw = await scoredRes.json();
+    // Deduplicate: keep only the latest swipe per listing (already ordered desc)
+    const seen = new Set();
+    const scored = [];
+    if (Array.isArray(scoredRaw)) {
+      for (const s of scoredRaw) {
+        if (!seen.has(s.listing_id)) {
+          seen.add(s.listing_id);
+          scored.push(s);
+        }
+      }
+    }
+    if (scored.length >= 10) {
       const positive = ['right', 'favorite', 'super_like'];
       let correct = 0;
       scored.forEach(s => {
         const liked = positive.includes(s.action);
-        const predicted = s.predicted_score > 50; // >50% = model predicts like
+        const predicted = s.predicted_score > 50;
         if (liked === predicted) correct++;
       });
       accuracy = {
@@ -496,9 +507,20 @@ async function handleStats(request, env) {
 
 async function handleAccuracyHistory(request, env) {
   try {
-    const scoredRes = await supa(env, 'swipes?predicted_score=not.is.null&select=action,predicted_score,created_at&order=created_at.asc&limit=1000');
-    const scored = await scoredRes.json();
-    if (!Array.isArray(scored) || scored.length < 10) {
+    const scoredRes = await supa(env, 'swipes?predicted_score=not.is.null&select=listing_id,action,predicted_score,created_at&order=created_at.asc&limit=1000');
+    const scoredRaw = await scoredRes.json();
+    // Deduplicate: keep only the first swipe per listing (asc order)
+    const seenIds = new Set();
+    const scored = [];
+    if (Array.isArray(scoredRaw)) {
+      for (const s of scoredRaw) {
+        if (!seenIds.has(s.listing_id)) {
+          seenIds.add(s.listing_id);
+          scored.push(s);
+        }
+      }
+    }
+    if (scored.length < 10) {
       return json({ points: [] }, 200, request);
     }
 

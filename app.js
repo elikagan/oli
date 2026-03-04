@@ -846,6 +846,7 @@
     investigateView.classList.add('hidden');
     artistsView.classList.add('hidden');
     settingsView.classList.add('hidden');
+    actionBtns.classList.add('hidden');
 
     if (tab === 'scout') {
       scoutView.classList.remove('hidden');
