@@ -45,12 +45,20 @@
 
   <!-- Investigate Screen -->
   <section id="investigate-view" class="view hidden">
+    <!-- Saved Items -->
+    <div class="section-header" id="saved-header">Saved Items <span id="saved-count" class="section-count"></span></div>
     <div id="fav-list" class="fav-list">
       <!-- Favorites injected by JS -->
     </div>
-    <div id="fav-empty" class="empty-state">
+    <div id="fav-empty" class="empty-state" style="height:auto;padding:32px 24px;">
       <p>No saved items yet.</p>
       <p class="empty-sub">Star items while scouting to add them here.</p>
+    </div>
+
+    <!-- Artist Targets -->
+    <div class="section-header" id="artists-header">Artist Targets <span id="artists-count" class="section-count"></span></div>
+    <div id="artist-list" class="fav-list">
+      <!-- Artists injected by JS -->
     </div>
   </section>
 

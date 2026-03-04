@@ -53,6 +53,9 @@ export default {
       if (url.pathname === '/artists' && request.method === 'POST')
         return handleImportArtists(request, env);
 
+      if (url.pathname === '/artists' && request.method === 'DELETE')
+        return handleDeleteArtist(request, env, url);
+
       return new Response('Not found', { status: 404, headers: corsHeaders(request) });
     } catch (e) {
       console.error('Worker error:', e);
@@ -554,8 +557,8 @@ async function handleImportArtists(request, env) {
       return json({ error: 'Expected JSON array of artists' }, 400, request);
     }
 
-    // Upsert by name
-    const res = await supa(env, 'artists', {
+    // Upsert by name (on_conflict=name for merge-duplicates)
+    const res = await supa(env, 'artists?on_conflict=name', {
       method: 'POST',
       body: JSON.stringify(artists),
       headers: {
@@ -563,13 +566,29 @@ async function handleImportArtists(request, env) {
       }
     });
     const result = await res.json();
+    if (!Array.isArray(result)) {
+      return json({ ok: false, error: result, imported: 0 }, 200, request);
+    }
     return json({
       ok: true,
-      imported: Array.isArray(result) ? result.length : 0
+      imported: result.length
     }, 200, request);
   } catch (e) {
     return json({ error: e.message, stack: e.stack }, 500, request);
   }
+}
+
+// ── DELETE /artists?name=... ─────────────────────────────
+
+async function handleDeleteArtist(request, env, url) {
+  const name = url.searchParams.get('name');
+  if (!name) return json({ error: 'name param required' }, 400, request);
+  const res = await supa(env, `artists?name=eq.${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    headers: { 'Prefer': 'return=representation' }
+  });
+  const result = await res.json();
+  return json({ ok: true, deleted: Array.isArray(result) ? result.length : 0 }, 200, request);
 }
 
 // ── POST /fix-houses ─────────────────────────────────────

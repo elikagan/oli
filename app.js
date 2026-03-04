@@ -19,6 +19,7 @@
   let feed = [];
   let feedIndex = 0;
   let favorites = [];
+  let artists = [];
   let swipedIds = new Set();
   let currentTab = 'scout';
   let isDragging = false;
@@ -33,6 +34,9 @@
   const emptyState = document.getElementById('empty-state');
   const favList = document.getElementById('fav-list');
   const favEmpty = document.getElementById('fav-empty');
+  const artistList = document.getElementById('artist-list');
+  const savedCount = document.getElementById('saved-count');
+  const artistsCount = document.getElementById('artists-count');
   const tabbar = document.getElementById('tabbar');
   const settingsBtn = document.getElementById('settings-btn');
   const cfgCancel = document.getElementById('cfg-cancel');
@@ -158,6 +162,16 @@
       await apiFetch('/favorites/' + favId, { method: 'DELETE' });
     } catch (e) {
       console.error('Favorite remove failed:', e);
+    }
+  }
+
+  async function fetchArtists() {
+    try {
+      const data = await apiFetch('/artists');
+      return data.artists || [];
+    } catch (e) {
+      console.error('Artists fetch failed:', e);
+      return [];
     }
   }
 
@@ -484,6 +498,8 @@
 
   // ── Investigate List ────────────────────────────────────
   function renderFavorites() {
+    savedCount.textContent = favorites.length ? `(${favorites.length})` : '';
+
     if (favorites.length === 0) {
       favList.innerHTML = '';
       favEmpty.classList.remove('hidden');
@@ -523,6 +539,37 @@
     });
   }
 
+  // ── Artist Targets List ────────────────────────────────
+  function renderArtists() {
+    artistsCount.textContent = artists.length ? `(${artists.length})` : '';
+
+    if (artists.length === 0) {
+      artistList.innerHTML = '<div style="padding:16px;color:var(--gray);font-size:13px;">No artist targets loaded.</div>';
+      return;
+    }
+
+    artistList.innerHTML = artists.map(a => {
+      const age = a.age ? `${a.age}` : '';
+      const loc = a.location || '';
+      const meta = [age ? `Age ${age}` : '', loc].filter(Boolean).join(' · ');
+      const repClass = a.rep_status || 'rep-none';
+      const repLabel = a.rep_label || 'Unknown';
+
+      return `
+        <div class="artist-item">
+          <div class="artist-priority ${esc(a.priority || 'med')}"></div>
+          <div class="artist-info">
+            <div class="artist-name">${esc(a.name)}</div>
+            <div class="artist-medium">${esc(a.medium || '')}</div>
+            <div class="artist-meta">${esc(meta)}</div>
+            <span class="artist-rep ${esc(repClass)}">${esc(repLabel)}</span>
+          </div>
+          <div class="artist-age">${esc(age)}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
   // ── Navigation ──────────────────────────────────────────
   function switchTab(tab) {
     currentTab = tab;
@@ -550,8 +597,11 @@
   }
 
   async function loadFavorites() {
-    favorites = await fetchFavorites();
+    const [favs, arts] = await Promise.all([fetchFavorites(), fetchArtists()]);
+    favorites = favs;
+    artists = arts;
     renderFavorites();
+    renderArtists();
   }
 
   async function loadStats() {
