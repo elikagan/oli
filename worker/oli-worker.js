@@ -44,6 +44,9 @@ export default {
       if (url.pathname === '/debug/swipe-dupes' && request.method === 'GET')
         return handleSwipeDupes(request, url, env);
 
+      if (url.pathname === '/admin/cleanup-nk' && request.method === 'POST')
+        return handleCleanupNK(request, env);
+
       if (url.pathname === '/fix-houses' && request.method === 'POST')
         return handleFixHouses(request, env);
 
@@ -52,6 +55,9 @@ export default {
 
       if (url.pathname === '/migrate' && request.method === 'POST')
         return handleMigrate(request, env);
+
+      if (url.pathname === '/scrape/craigslist' && request.method === 'POST')
+        return handleScrapeCraigslist(request, env);
 
       if (url.pathname === '/artists' && request.method === 'GET')
         return handleGetArtists(request, env);
@@ -77,10 +83,24 @@ export default {
     const idx = Math.floor(hour / 4) % sellerIds.length; // 6 cron runs/day, rotate through houses
     const sellerId = parseInt(sellerIds[idx]);
     const houseName = LA_SELLERS[sellerId];
+    // Also scrape Craigslist every other run (every 8h)
+    const runCL = (hour % 8 === 0);
     ctx.waitUntil(
-      scrapeSellerListings(env, sellerId, houseName)
-        .then(count => console.log(`[OLI] Cron scraped ${houseName}: ${count} new`))
-        .catch(e => console.error(`[OLI] Cron failed for ${houseName}:`, e))
+      Promise.all([
+        scrapeSellerListings(env, sellerId, houseName)
+          .then(count => console.log(`[OLI] Cron scraped ${houseName}: ${count} new`))
+          .catch(e => console.error(`[OLI] Cron failed for ${houseName}:`, e)),
+        runCL ? (async () => {
+          for (const search of CL_SEARCHES) {
+            try {
+              const count = await scrapeCraigslistSearch(env, search);
+              console.log(`[OLI] Cron CL ${search.name}: ${count} new`);
+            } catch (e) {
+              console.error(`[OLI] Cron CL ${search.name} failed:`, e);
+            }
+          }
+        })() : Promise.resolve()
+      ])
     );
   }
 };
@@ -318,6 +338,45 @@ async function handleSwipeDupes(request, url, env) {
       swipes
     })),
     recent_5: recent
+  }, 200, request);
+}
+
+async function handleCleanupNK(request, env) {
+  // Mark cheap NK listings as inactive (under $50 = pencils, magnets, openers, etc.)
+  const cheapRes = await fetch(`${env.SUPABASE_URL}/rest/v1/listings?auction_house=eq.Nickey%20Kehoe&status=eq.active&price=lt.50&select=id,title,price`, {
+    headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`, 'Range': '0-999' }
+  });
+  const cheap = await cheapRes.json();
+
+  // Also get null-price NK listings (events, consultancies)
+  const nullRes = await fetch(`${env.SUPABASE_URL}/rest/v1/listings?auction_house=eq.Nickey%20Kehoe&status=eq.active&price=is.null&select=id,title`, {
+    headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`, 'Range': '0-999' }
+  });
+  const nullPrice = await nullRes.json();
+
+  const toDeactivate = [...(Array.isArray(cheap) ? cheap : []), ...(Array.isArray(nullPrice) ? nullPrice : [])];
+  const ids = toDeactivate.map(l => l.id);
+
+  if (ids.length > 0) {
+    // Batch update in groups of 100
+    for (let i = 0; i < ids.length; i += 100) {
+      const batch = ids.slice(i, i + 100);
+      await fetch(`${env.SUPABASE_URL}/rest/v1/listings?id=in.(${batch.join(',')})`, {
+        method: 'PATCH',
+        headers: {
+          'apikey': env.SUPABASE_SERVICE_KEY,
+          'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=minimal'
+        },
+        body: JSON.stringify({ status: 'inactive' })
+      });
+    }
+  }
+
+  return json({
+    deactivated: ids.length,
+    samples: toDeactivate.slice(0, 10).map(l => ({ title: l.title, price: l.price || null }))
   }, 200, request);
 }
 
@@ -1171,7 +1230,11 @@ function transformLAItem(item, sellerId, houseName) {
 const SHOPIFY_STORES = {
   'blackmancruz': { url: 'https://www.blackmancruz.com', name: 'Blackman Cruz' },
   'thewindowla':  { url: 'https://thewindowla.com',      name: 'The Window LA' },
-  'nickeykehoe':  { url: 'https://nickeykehoe.com',       name: 'Nickey Kehoe' }
+  'nickeykehoe':  { url: 'https://nickeykehoe.com',       name: 'Nickey Kehoe', minPrice: 50,
+    excludeTypes: ['WOOD/FABRIC/WALLPAPER SAMPLE', 'CLEANING + UTILITY', 'BATH ACCESSORIES',
+      'BATH TOWELS', 'SHEETS & PILLOWCASES', 'BEDDING', 'BRUSHES', 'APOTHECARY', 'CANDLES',
+      'PAPER + OFFICE', 'FLATWARE', 'KITCHEN TOOLS', 'DINNERWARE', 'GARDEN ACCESSORIES'],
+    excludeTags: ['Events', 'Gift', 'Samples', 'Swatch', 'Fabric'] }
 };
 
 async function scrapeShopifyStore(env, storeKey) {
@@ -1196,8 +1259,24 @@ async function scrapeShopifyStore(env, storeKey) {
     const products = data?.products || [];
     if (products.length === 0) break;
 
-    // Transform to our listing format
-    const batch = products.map(p => transformShopifyProduct(p, store)).filter(l => l.hero_image);
+    // Transform to our listing format, applying store-specific filters
+    const batch = products
+      .filter(p => {
+        // Exclude by product type
+        if (store.excludeTypes && store.excludeTypes.includes(p.product_type)) return false;
+        // Exclude by tags
+        if (store.excludeTags) {
+          const tags = typeof p.tags === 'string' ? p.tags : (p.tags || []).join(',');
+          if (store.excludeTags.some(t => tags.includes(t))) return false;
+        }
+        // Exclude by minimum price
+        if (store.minPrice) {
+          const price = parseFloat(p.variants?.[0]?.price) || 0;
+          if (price < store.minPrice) return false;
+        }
+        return true;
+      })
+      .map(p => transformShopifyProduct(p, store)).filter(l => l.hero_image);
 
     // Upsert
     if (batch.length > 0) {
@@ -1262,6 +1341,144 @@ async function scrapeAllShopify(env) {
     }
   }
   return total;
+}
+
+// ── Craigslist Scraping ──────────────────────────────────
+
+const CL_SEARCHES = [
+  { url: 'https://losangeles.craigslist.org/search/ata', name: 'LA Antiques', category: 'antiques' }
+];
+
+const CL_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+async function handleScrapeCraigslist(request, env) {
+  try {
+    let total = 0;
+    for (const search of CL_SEARCHES) {
+      const count = await scrapeCraigslistSearch(env, search);
+      total += count;
+    }
+    return json({ ok: true, new_listings: total }, 200, request);
+  } catch (e) {
+    return json({ error: e.message }, 500, request);
+  }
+}
+
+async function scrapeCraigslistSearch(env, search) {
+  // Step 1: Fetch search results page
+  const res = await fetch(search.url, {
+    headers: { 'User-Agent': CL_UA, 'Accept': 'text/html' }
+  });
+  if (!res.ok) {
+    console.error(`[OLI] CL search failed: ${res.status}`);
+    return 0;
+  }
+  const html = await res.text();
+
+  // Step 2: Parse static search results
+  const resultPattern = /<li[^>]*class="[^"]*cl-static-search-result[^"]*"[^>]*>(.*?)<\/li>/gs;
+  const listings = [];
+  let match;
+  while ((match = resultPattern.exec(html)) !== null) {
+    const r = match[1];
+    const urlMatch = r.match(/href="([^"]+)"/);
+    const titleMatch = r.match(/<div class="title">(.*?)<\/div>/);
+    const priceMatch = r.match(/<div class="price">([^<]*)<\/div>/);
+    const locMatch = r.match(/<div class="location">\s*(.*?)\s*<\/div>/s);
+    if (!urlMatch) continue;
+
+    const url = urlMatch[1];
+    const clId = url.match(/\/(\d+)\.html/)?.[1];
+    if (!clId) continue;
+
+    const priceStr = (priceMatch?.[1] || '').replace(/[^0-9.]/g, '');
+    listings.push({
+      platform_id: `cl_${clId}`,
+      title: (titleMatch?.[1] || 'Untitled').trim(),
+      price: priceStr ? parseFloat(priceStr) : null,
+      location: (locMatch?.[1] || 'Los Angeles').trim(),
+      url
+    });
+  }
+
+  if (listings.length === 0) {
+    console.log(`[OLI] CL ${search.name}: no results found`);
+    return 0;
+  }
+
+  // Step 3: Check which listings are already in DB (single query for all CL listings)
+  const existingIds = new Set();
+  const checkRes = await supa(env, `listings?platform=eq.craigslist&select=platform_id`, { headers: { 'Range': '0-9999' } });
+  const existing = await checkRes.json();
+  if (Array.isArray(existing)) existing.forEach(e => existingIds.add(e.platform_id));
+
+  const newListings = listings.filter(l => !existingIds.has(l.platform_id));
+  if (newListings.length === 0) {
+    console.log(`[OLI] CL ${search.name}: ${listings.length} found, 0 new`);
+    return 0;
+  }
+
+  // Step 4: Fetch individual pages for images (limit to 8 per run to stay under 50 subrequest limit)
+  const toFetch = newListings.slice(0, 8);
+  const batch = [];
+
+  for (const listing of toFetch) {
+    try {
+      const pageRes = await fetch(listing.url, {
+        headers: { 'User-Agent': CL_UA, 'Accept': 'text/html' }
+      });
+      if (!pageRes.ok) continue;
+      const pageHtml = await pageRes.text();
+
+      // Extract first image
+      const imgMatch = pageHtml.match(/"(https:\/\/images\.craigslist\.org\/[^"]+_600x450\.jpg)"/);
+      const heroImage = imgMatch?.[1] || null;
+
+      // Extract description
+      const bodyMatch = pageHtml.match(/id="postingbody"[^>]*>(.*?)<\/section>/s);
+      let description = '';
+      if (bodyMatch) {
+        description = bodyMatch[1].replace(/<[^>]*>/g, ' ').replace(/QR Code Link to This Post/i, '').replace(/\s+/g, ' ').trim();
+      }
+
+      batch.push({
+        platform: 'craigslist',
+        platform_id: listing.platform_id,
+        title: listing.title,
+        description: description || listing.title,
+        price: listing.price,
+        currency: 'USD',
+        location: listing.location || 'Los Angeles, CA',
+        url: listing.url,
+        image_urls: heroImage ? [heroImage] : [],
+        hero_image: heroImage,
+        auction_house: 'Craigslist LA',
+        auction_date: new Date().toISOString(),
+        lot_number: null,
+        maker: null,
+        status: 'active'
+      });
+
+      await sleep(200); // Be nice to CL servers
+    } catch (e) {
+      console.error(`[OLI] CL fetch failed for ${listing.url}:`, e);
+    }
+  }
+
+  // Step 5: Upsert to DB
+  if (batch.length > 0) {
+    const upsertRes = await supa(env, 'listings', {
+      method: 'POST',
+      body: JSON.stringify(batch),
+      headers: { 'Prefer': 'return=representation,resolution=ignore-duplicates' }
+    });
+    const inserted = await upsertRes.json();
+    const count = Array.isArray(inserted) ? inserted.length : 0;
+    console.log(`[OLI] CL ${search.name}: ${listings.length} found, ${newListings.length} new, ${count} inserted`);
+    return count;
+  }
+
+  return 0;
 }
 
 // ── AI Processing ─────────────────────────────────────────
