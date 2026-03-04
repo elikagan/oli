@@ -55,10 +55,17 @@
   // ── IndexedDB ───────────────────────────────────────────
   function openDB() {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(DB_STORE);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      const timeout = setTimeout(() => reject(new Error('IndexedDB timeout')), 3000);
+      try {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore(DB_STORE);
+        req.onsuccess = () => { clearTimeout(timeout); resolve(req.result); };
+        req.onerror = () => { clearTimeout(timeout); reject(req.error); };
+        req.onblocked = () => { clearTimeout(timeout); reject(new Error('IndexedDB blocked')); };
+      } catch (e) {
+        clearTimeout(timeout);
+        reject(e);
+      }
     });
   }
 
