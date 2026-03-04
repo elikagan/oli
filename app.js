@@ -131,7 +131,7 @@
     swipedIds.add(listingId);
     saveSwipedIds();
     const listing = feed.find(l => l.id === listingId);
-    const predicted_score = listing?.similarity != null ? Math.round(listing.similarity * 100) : null;
+    const predicted_score = listing?.knn_score != null ? listing.knn_score : (listing?.similarity != null ? Math.round(listing.similarity * 100) : null);
     try {
       await apiFetch('/swipe', {
         method: 'POST',
@@ -229,7 +229,7 @@
 
     const heroUrl = listing.hero_image || '';
     const price = listing.price ? '$' + Number(listing.price).toLocaleString() : '';
-    const score = listing.similarity != null ? Math.round(listing.similarity * 100) : null;
+    const score = listing.knn_score != null ? listing.knn_score : (listing.similarity != null ? Math.round(listing.similarity * 100) : null);
     const maker = listing.maker || '';
     const ad = listing.auction_data || {};
 

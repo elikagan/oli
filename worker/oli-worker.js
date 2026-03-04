@@ -134,16 +134,12 @@ function supaRpc(env, fnName, params = {}) {
 
 async function handleFeed(request, url, env) {
   const limit = parseInt(url.searchParams.get('limit') || '20');
-  const excludeRaw = url.searchParams.get('exclude') || '';
-  const clientExcludeIds = excludeRaw ? excludeRaw.split(',').filter(Boolean) : [];
 
-  // Fetch swiped IDs from server (dedupes across devices)
+  // Fetch swiped IDs from server
   const swipedRes = await supa(env, 'swipes?select=listing_id');
   const swipedRows = await swipedRes.json();
-  const serverSwipedIds = (Array.isArray(swipedRows) ? swipedRows : []).map(r => r.listing_id);
-
-  // Build a Set for fast JS-side filtering (avoids URL length limits)
-  const excludeSet = new Set([...clientExcludeIds, ...serverSwipedIds]);
+  const swipedIds = (Array.isArray(swipedRows) ? swipedRows : []).map(r => r.listing_id);
+  const swipedSet = new Set(swipedIds);
 
   // Get taste profile
   const profileRes = await supa(env, 'taste_profile?id=eq.1&select=*');
@@ -165,15 +161,15 @@ async function handleFeed(request, url, env) {
   const negCentroid = parseCentroid(profile?.negative_centroid);
 
   if (posCentroid && (profile?.positive_count || 0) >= 10) {
-    // ── Ranked mode: use taste model with negative centroid ──
+    // ── Ranked mode: taste model with negative centroid ──
     const rankedCount = Math.ceil(limit * 0.8);
     const randomCount = limit - rankedCount;
 
-    // RPC — fetch more than needed, filter in JS (avoids passing huge UUID arrays to Postgres)
+    // Pass swiped IDs to Postgres for exclusion (RPC body, no URL length issue)
     const rpcParams = {
       query_embedding: posCentroid,
-      match_count: rankedCount + Math.min(excludeSet.size, 200),
-      exclude_ids: [] // filter in JS instead — large arrays break Postgres
+      match_count: rankedCount + 20,
+      exclude_ids: swipedIds
     };
     if (negCentroid) rpcParams.neg_embedding = negCentroid;
 
@@ -183,32 +179,48 @@ async function handleFeed(request, url, env) {
       return json({ listings: [] }, 200, request);
     }
 
-    // Filter out swiped items in JS
-    const rankedFiltered = ranked.filter(l => !excludeSet.has(l.id)).slice(0, rankedCount);
+    const rankedFiltered = ranked.slice(0, rankedCount);
 
-    // Random exploration — fetch a pool and filter in JS
+    // Random exploration
+    const rankedIds = new Set(rankedFiltered.map(r => r.id));
     const randomRes = await supa(env,
       `listings?status=eq.active&hero_image=not.is.null&embedding=not.is.null&select=${selectFields}&order=scraped_at.desc&limit=${randomCount + 50}`
     );
     const randomPool = await randomRes.json();
-    const rankedIds = new Set(rankedFiltered.map(r => r.id));
     const random = (Array.isArray(randomPool) ? randomPool : [])
-      .filter(l => !excludeSet.has(l.id) && !rankedIds.has(l.id))
+      .filter(l => !swipedSet.has(l.id) && !rankedIds.has(l.id))
       .slice(0, randomCount);
 
     listings = [...rankedFiltered, ...random];
   } else {
-    // ── Cold start: fetch a big pool, filter + shuffle to mix auction houses ──
-    const poolSize = Math.min(limit * 5 + excludeSet.size, 500);
+    // ── Cold start: fetch pool, exclude swiped, shuffle ──
+    const poolSize = Math.min(limit * 5, 500);
     const res = await supa(env,
       `listings?status=eq.active&hero_image=not.is.null&select=${selectFields}&order=scraped_at.desc&limit=${poolSize}`
     );
     const pool = await res.json();
-    const filtered = (Array.isArray(pool) ? pool : []).filter(l => !excludeSet.has(l.id));
+    const filtered = (Array.isArray(pool) ? pool : []).filter(l => !swipedSet.has(l.id));
     listings = shuffle(filtered).slice(0, limit);
   }
 
-  // Shuffle to avoid runs of similar items
+  // k-NN prediction: score each listing by its nearest swiped neighbors
+  if (listings && listings.length > 0) {
+    try {
+      const targetIds = listings.map(l => l.id);
+      const knnRes = await supaRpc(env, 'predict_knn', { target_ids: targetIds, k: 10 });
+      const knnData = await knnRes.json();
+      if (Array.isArray(knnData)) {
+        const knnMap = new Map(knnData.map(r => [r.listing_id, r.knn_score]));
+        listings.forEach(l => {
+          const knn = knnMap.get(l.id);
+          if (knn != null) l.knn_score = Math.round(knn * 100);
+        });
+      }
+    } catch (e) {
+      console.error('k-NN prediction failed:', e);
+    }
+  }
+
   listings = shuffle(listings || []);
 
   return json({ listings }, 200, request);
@@ -256,8 +268,9 @@ async function updateTasteProfile(env, embedding, action) {
   const centroidKey = side + '_centroid';
   const countKey = side + '_count';
 
-  // Super like/hate = 25x weight (nuclear options for strong taste signals)
-  const weight = (action === 'super_hate' || action === 'super_like') ? 25 : 1;
+  // Weighted signals: super=3x, favorite=2x, regular=1x
+  const weight = (action === 'super_hate' || action === 'super_like') ? 3
+    : (action === 'favorite') ? 2 : 1;
 
   // Get current profile
   const res = await supa(env, 'taste_profile?id=eq.1&select=*');
@@ -495,7 +508,8 @@ async function handleRebuildTaste(request, env) {
     if (!embedding) { skipped++; continue; }
 
     const side = (swipe.action === 'left' || swipe.action === 'super_hate') ? 'negative' : 'positive';
-    const weight = (swipe.action === 'super_hate' || swipe.action === 'super_like') ? 25 : 1;
+    const weight = (swipe.action === 'super_hate' || swipe.action === 'super_like') ? 3
+      : (swipe.action === 'favorite') ? 2 : 1;
 
     if (side === 'positive') {
       const newCount = posCount + weight;
@@ -590,7 +604,7 @@ CREATE POLICY "anon_read_artists" ON artists FOR SELECT TO anon USING (true);
 DROP POLICY IF EXISTS "service_write_artists" ON artists;
 CREATE POLICY "service_write_artists" ON artists FOR ALL TO service_role USING (true);
 
--- 4. Update match_listings to support negative centroid + return maker + similarity
+-- 4. Update match_listings: neg weight 0.3 → 0.5
 CREATE OR REPLACE FUNCTION match_listings(
   query_embedding VECTOR(768),
   neg_embedding VECTOR(768) DEFAULT NULL,
@@ -613,7 +627,7 @@ BEGIN
     l.ai_description, l.maker, l.auction_data,
     CASE
       WHEN neg_embedding IS NOT NULL THEN
-        (1 - (l.embedding <=> query_embedding))::FLOAT - 0.3 * (1 - (l.embedding <=> neg_embedding))::FLOAT
+        (1 - (l.embedding <=> query_embedding))::FLOAT - 0.5 * (1 - (l.embedding <=> neg_embedding))::FLOAT
       ELSE
         (1 - (l.embedding <=> query_embedding))::FLOAT
     END AS similarity
@@ -626,6 +640,39 @@ BEGIN
   LIMIT match_count;
 END;
 $$;
+
+-- 5. k-NN prediction: for each listing, find K nearest swiped items and return % liked
+CREATE OR REPLACE FUNCTION predict_knn(
+  target_ids UUID[],
+  k INT DEFAULT 10
+)
+RETURNS TABLE (listing_id UUID, knn_score FLOAT)
+LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    t.id AS listing_id,
+    COALESCE(nn.score, 0.5)::FLOAT AS knn_score
+  FROM unnest(target_ids) AS tid(id)
+  JOIN listings t ON t.id = tid.id AND t.embedding IS NOT NULL
+  LEFT JOIN LATERAL (
+    SELECT AVG(
+      CASE WHEN s.action IN ('right', 'favorite', 'super_like') THEN 1.0 ELSE 0.0 END
+    ) AS score
+    FROM (
+      SELECT sw.action
+      FROM swipes sw
+      JOIN listings sl ON sl.id = sw.listing_id AND sl.embedding IS NOT NULL
+      ORDER BY sl.embedding <=> t.embedding
+      LIMIT k
+    ) s
+  ) nn ON true;
+END;
+$$;
+
+-- 6. Index for faster k-NN lookups
+CREATE INDEX IF NOT EXISTS idx_listings_embedding_hnsw
+  ON listings USING hnsw (embedding vector_cosine_ops);
   `.trim();
 
   return json({
