@@ -149,7 +149,7 @@ async function handleFeed(request, url, env) {
 
   let listings;
 
-  const selectFields = 'id,platform,platform_id,title,description,price,location,url,hero_image,image_urls,auction_house,auction_date,lot_number,ai_description,maker';
+  const selectFields = 'id,platform,platform_id,title,description,price,location,url,hero_image,image_urls,auction_house,auction_date,lot_number,ai_description,maker,auction_data';
 
   // Parse centroids (pgvector returns strings)
   const parseCentroid = (c) => {
@@ -176,6 +176,9 @@ async function handleFeed(request, url, env) {
 
     const matchRes = await supaRpc(env, 'match_listings', rpcParams);
     const ranked = await matchRes.json();
+    if (!Array.isArray(ranked)) {
+      return json({ listings: [] }, 200, request);
+    }
 
     // Random exploration — fetch a pool and filter in JS
     const randomRes = await supa(env,
@@ -216,16 +219,18 @@ function shuffle(arr) {
 // ── POST /swipe ───────────────────────────────────────────
 
 async function handleSwipe(request, env) {
-  const { listing_id, action } = await request.json();
+  const { listing_id, action, predicted_score } = await request.json();
 
   if (!listing_id || !['left', 'right', 'favorite', 'super_like', 'super_hate'].includes(action)) {
     return json({ error: 'Invalid swipe' }, 400, request);
   }
 
-  // Record swipe
+  // Record swipe with prediction score for accuracy tracking
+  const swipeData = { listing_id, action };
+  if (predicted_score != null) swipeData.predicted_score = predicted_score;
   await supa(env, 'swipes', {
     method: 'POST',
-    body: JSON.stringify({ listing_id, action })
+    body: JSON.stringify(swipeData)
   });
 
   // Update taste profile if listing has embedding
@@ -339,11 +344,37 @@ async function handleStats(request, env) {
   const listingCountRes = await supa(env, 'listings?status=eq.active&select=id', { headers: { 'Prefer': 'count=exact' } });
   const listingCount = parseInt(listingCountRes.headers.get('content-range')?.split('/')[1] || '0');
 
+  // Prediction accuracy: analyze scored swipes
+  let accuracy = null;
+  try {
+    const scoredRes = await supa(env, 'swipes?predicted_score=not.is.null&select=action,predicted_score&order=created_at.desc&limit=200');
+    const scored = await scoredRes.json();
+    if (Array.isArray(scored) && scored.length >= 10) {
+      const positive = ['right', 'favorite', 'super_like'];
+      let correct = 0;
+      scored.forEach(s => {
+        const liked = positive.includes(s.action);
+        const predicted = s.predicted_score > 50; // >50% = model predicts like
+        if (liked === predicted) correct++;
+      });
+      accuracy = {
+        total_scored: scored.length,
+        correct,
+        pct: Math.round((correct / scored.length) * 100),
+        avg_liked_score: Math.round(scored.filter(s => positive.includes(s.action)).reduce((sum, s) => sum + s.predicted_score, 0) / Math.max(1, scored.filter(s => positive.includes(s.action)).length)),
+        avg_skipped_score: Math.round(scored.filter(s => !positive.includes(s.action)).reduce((sum, s) => sum + s.predicted_score, 0) / Math.max(1, scored.filter(s => !positive.includes(s.action)).length))
+      };
+    }
+  } catch (e) {
+    console.error('Accuracy calc failed:', e);
+  }
+
   return json({
     positive_count: profile.positive_count,
     negative_count: profile.negative_count,
     favorites_count: favCount,
-    active_listings: listingCount
+    active_listings: listingCount,
+    accuracy
   }, 200, request);
 }
 
@@ -467,6 +498,12 @@ async function supaSQL(env, query) {
 async function handleMigrate(request, env) {
   // Return the SQL that needs to be run manually in Supabase SQL Editor
   const sql = `
+-- Phase 2A: Prediction accuracy tracking
+ALTER TABLE swipes ADD COLUMN IF NOT EXISTS predicted_score FLOAT;
+
+-- Phase 3A: Richer auction data
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS auction_data JSONB;
+
 -- 1. Add maker column to listings
 ALTER TABLE listings ADD COLUMN IF NOT EXISTS maker TEXT;
 
@@ -493,8 +530,10 @@ CREATE TABLE IF NOT EXISTS artists (
 
 -- 3. RLS for artists table
 ALTER TABLE artists ENABLE ROW LEVEL SECURITY;
-CREATE POLICY IF NOT EXISTS "anon_read_artists" ON artists FOR SELECT TO anon USING (true);
-CREATE POLICY IF NOT EXISTS "service_write_artists" ON artists FOR ALL TO service_role USING (true);
+DROP POLICY IF EXISTS "anon_read_artists" ON artists;
+CREATE POLICY "anon_read_artists" ON artists FOR SELECT TO anon USING (true);
+DROP POLICY IF EXISTS "service_write_artists" ON artists;
+CREATE POLICY "service_write_artists" ON artists FOR ALL TO service_role USING (true);
 
 -- 4. Update match_listings to support negative centroid + return maker + similarity
 CREATE OR REPLACE FUNCTION match_listings(
@@ -507,7 +546,7 @@ RETURNS TABLE (
   id UUID, platform TEXT, platform_id TEXT, title TEXT, description TEXT,
   price NUMERIC, location TEXT, url TEXT, hero_image TEXT, image_urls TEXT[],
   auction_house TEXT, auction_date TIMESTAMPTZ, lot_number TEXT,
-  ai_description TEXT, maker TEXT, similarity FLOAT
+  ai_description TEXT, maker TEXT, auction_data JSONB, similarity FLOAT
 )
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -516,7 +555,7 @@ BEGIN
     l.id, l.platform, l.platform_id, l.title, l.description,
     l.price, l.location, l.url, l.hero_image, l.image_urls,
     l.auction_house, l.auction_date, l.lot_number,
-    l.ai_description, l.maker,
+    l.ai_description, l.maker, l.auction_data,
     CASE
       WHEN neg_embedding IS NOT NULL THEN
         (1 - (l.embedding <=> query_embedding))::FLOAT - 0.3 * (1 - (l.embedding <=> neg_embedding))::FLOAT
@@ -842,12 +881,12 @@ async function scrapeSellerListings(env, sellerId, houseName) {
     // Batch transform all items on this page
     const batch = items.map(item => transformLAItem(item, sellerId, houseName));
 
-    // Bulk upsert entire page in one Supabase call
-    const upsertRes = await supa(env, 'listings', {
+    // Bulk upsert — merge to update auction_data on existing listings
+    const upsertRes = await supa(env, 'listings?on_conflict=platform,platform_id', {
       method: 'POST',
       body: JSON.stringify(batch),
       headers: {
-        'Prefer': 'return=representation,resolution=ignore-duplicates'
+        'Prefer': 'return=representation,resolution=merge-duplicates'
       }
     });
     const inserted = await upsertRes.json();
@@ -888,7 +927,23 @@ function transformLAItem(item, sellerId, houseName) {
     auction_house: houseName,
     auction_date: item.saleStartTs ? new Date(item.saleStartTs * 1000).toISOString() : null,
     lot_number: item.lotNumber || null,
-    status: 'active'
+    status: 'active',
+    auction_data: {
+      low_estimate: item.lowBidEstimate || null,
+      high_estimate: item.highBidEstimate || null,
+      start_price: item.startPrice || null,
+      leading_bid: item.leadingBid || 0,
+      bid_count: item.bidCount || 0,
+      sale_start: item.saleStartTs ? new Date(item.saleStartTs * 1000).toISOString() : null,
+      lot_end_estimate: item.lotEndTimeEstimatedTs ? new Date(item.lotEndTimeEstimatedTs * 1000).toISOString() : null,
+      catalog_status: item.catalogStatus || null,
+      is_live: !!item.isLiveAuction,
+      is_timed: !!item.isTimedAuction,
+      is_sold: !!item.isSold,
+      is_passed: !!item.isPassed,
+      sale_price: item.salePrice || null,
+      catalog_id: item.catalogId || null
+    }
   };
 }
 

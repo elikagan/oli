@@ -126,10 +126,13 @@
   async function recordSwipe(listingId, action) {
     swipedIds.add(listingId);
     saveSwipedIds(); // persist to IndexedDB (fire and forget)
+    // Find predicted score for accuracy tracking
+    const listing = feed.find(l => l.id === listingId);
+    const predicted_score = listing?.similarity != null ? Math.round(listing.similarity * 100) : null;
     try {
       await apiFetch('/swipe', {
         method: 'POST',
-        body: JSON.stringify({ listing_id: listingId, action })
+        body: JSON.stringify({ listing_id: listingId, action, predicted_score })
       });
     } catch (e) {
       console.error('Swipe record failed:', e);
@@ -217,11 +220,33 @@
     const price = listing.price ? '$' + Number(listing.price).toLocaleString() : '';
     const score = listing.similarity != null ? Math.round(listing.similarity * 100) : null;
     const maker = listing.maker || '';
+    const ad = listing.auction_data || {};
+
+    // Auction urgency: time until close + bid activity
+    let urgencyHtml = '';
+    if (ad.lot_end_estimate || ad.sale_start) {
+      const endDate = new Date(ad.lot_end_estimate || ad.sale_start);
+      const now = new Date();
+      const hoursLeft = Math.max(0, (endDate - now) / 3600000);
+      const bids = ad.bid_count || 0;
+      const parts = [];
+      if (hoursLeft < 24) parts.push(`${Math.round(hoursLeft)}h left`);
+      else if (hoursLeft < 168) parts.push(`${Math.round(hoursLeft / 24)}d left`);
+      if (bids > 0) parts.push(`${bids} bid${bids > 1 ? 's' : ''}`);
+      if (parts.length) urgencyHtml = `<span class="card-urgency${hoursLeft < 24 ? ' hot' : ''}">${esc(parts.join(' · '))}</span>`;
+    }
+
+    // Estimate range
+    let estimateHtml = '';
+    if (ad.low_estimate && ad.high_estimate) {
+      estimateHtml = `<span class="card-estimate">Est $${Number(ad.low_estimate).toLocaleString()}–$${Number(ad.high_estimate).toLocaleString()}</span>`;
+    }
 
     card.innerHTML = `
       <div class="card-image" style="background-color: #f0f0f0">
         <span class="card-badge">${esc(listing.platform)}</span>
         ${score !== null ? `<span class="card-score">${score}%</span>` : ''}
+        ${urgencyHtml}
         <div class="card-overlay like">LIKE</div>
         <div class="card-overlay skip">SKIP</div>
         <div class="card-overlay fav">\u2605</div>
@@ -233,6 +258,7 @@
           <span>${esc(meta)}</span>
           ${price ? `<span class="card-price">${price}</span>` : ''}
         </div>
+        ${estimateHtml}
       </div>
     `;
 
@@ -610,11 +636,31 @@
       settingsStats.innerHTML = '<p>Could not load stats.</p>';
       return;
     }
+    let accuracyHtml = '';
+    if (stats.accuracy) {
+      const a = stats.accuracy;
+      accuracyHtml = `
+        <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
+          <div class="stat-row"><span class="stat-label" style="font-weight:700;">Prediction Accuracy</span><span class="stat-val">${a.pct}%</span></div>
+          <div class="stat-row"><span class="stat-label">Scored swipes</span><span class="stat-val">${a.total_scored}</span></div>
+          <div class="stat-row"><span class="stat-label">Avg score (liked)</span><span class="stat-val">${a.avg_liked_score}%</span></div>
+          <div class="stat-row"><span class="stat-label">Avg score (skipped)</span><span class="stat-val">${a.avg_skipped_score}%</span></div>
+        </div>
+      `;
+    } else {
+      accuracyHtml = `
+        <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
+          <div class="stat-row"><span class="stat-label">Prediction Accuracy</span><span class="stat-val" style="color:var(--gray);">Need 10+ scored swipes</span></div>
+        </div>
+      `;
+    }
+
     settingsStats.innerHTML = `
       <div class="stat-row"><span class="stat-label">Right swipes</span><span class="stat-val">${stats.positive_count || 0}</span></div>
       <div class="stat-row"><span class="stat-label">Left swipes</span><span class="stat-val">${stats.negative_count || 0}</span></div>
       <div class="stat-row"><span class="stat-label">Favorites</span><span class="stat-val">${stats.favorites_count || 0}</span></div>
       <div class="stat-row"><span class="stat-label">Active listings</span><span class="stat-val">${stats.active_listings || 0}</span></div>
+      ${accuracyHtml}
     `;
   }
 

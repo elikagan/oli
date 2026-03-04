@@ -191,6 +191,30 @@ body {
   letter-spacing: 0.3px;
 }
 
+.card-urgency {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 100px;
+  letter-spacing: 0.3px;
+}
+
+.card-urgency.hot {
+  background: rgba(239,68,68,0.85);
+}
+
+.card-estimate {
+  display: block;
+  font-size: 11px;
+  color: var(--gray);
+  margin-top: 2px;
+}
+
 .card-info {
   padding: 12px 16px;
   border-top: 1px solid var(--border);
