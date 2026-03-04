@@ -762,66 +762,70 @@
     if (!points || points.length === 0) {
       accuracyChartWrap.innerHTML = `
         <div class="accuracy-chart-wrap">
-          <div class="accuracy-chart-title">Prediction Accuracy Over Time</div>
-          <div class="accuracy-chart-empty">Need more scored swipes to show chart</div>
+          <div class="accuracy-chart-title">Swipe Prediction</div>
+          <div class="accuracy-chart-empty">Need more swipes to show chart</div>
         </div>
       `;
       return;
     }
 
-    const W = 300, H = 120;
+    const W = 300, H = 140;
     const padL = 28, padR = 8, padT = 8, padB = 28;
     const chartW = W - padL - padR;
     const chartH = H - padT - padB;
 
-    const minY = Math.max(0, Math.min(...points.map(p => p.accuracy)) - 10);
-    const maxY = Math.min(100, Math.max(...points.map(p => p.accuracy)) + 10);
-    const rangeY = maxY - minY || 1;
+    // Always show 40-100% range for context (50% = coin flip)
+    const minY = 40;
+    const maxY = 100;
+    const rangeY = maxY - minY;
 
     const coords = points.map((p, i) => {
       const x = padL + (i / Math.max(1, points.length - 1)) * chartW;
-      const y = padT + chartH - ((p.accuracy - minY) / rangeY) * chartH;
+      const y = padT + chartH - ((Math.max(minY, Math.min(maxY, p.accuracy)) - minY) / rangeY) * chartH;
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     });
 
-    // Grid lines at 25%, 50%, 75%
+    // Grid lines
     let gridLines = '';
-    for (const pct of [25, 50, 75]) {
-      if (pct >= minY && pct <= maxY) {
-        const y = padT + chartH - ((pct - minY) / rangeY) * chartH;
-        gridLines += `<line class="grid" x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}"/>`;
-        gridLines += `<text class="axis-label" x="${padL - 4}" y="${(y + 3).toFixed(1)}" text-anchor="end">${pct}%</text>`;
-      }
+    for (const pct of [50, 75, 100]) {
+      const y = padT + chartH - ((pct - minY) / rangeY) * chartH;
+      gridLines += `<line class="grid" x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}"/>`;
+      gridLines += `<text class="axis-label" x="${padL - 4}" y="${(y + 3).toFixed(1)}" text-anchor="end">${pct}%</text>`;
     }
 
-    // 50% baseline
+    // 50% baseline (coin flip / random)
     const baseline50 = padT + chartH - ((50 - minY) / rangeY) * chartH;
 
-    // X-axis date labels — pick ~4 evenly spaced points
-    let dateLabels = '';
+    // X-axis: swipe count labels
+    let xLabels = '';
     const labelCount = Math.min(4, points.length);
-    const fmt = (iso) => {
-      const d = new Date(iso);
-      return `${d.getMonth() + 1}/${d.getDate()}`;
-    };
     for (let i = 0; i < labelCount; i++) {
       const idx = labelCount === 1 ? 0 : Math.round(i * (points.length - 1) / (labelCount - 1));
       const x = padL + (idx / Math.max(1, points.length - 1)) * chartW;
       const y = padT + chartH + 14;
-      dateLabels += `<text class="axis-label" x="${x.toFixed(1)}" y="${y}" text-anchor="middle">${fmt(points[idx].date)}</text>`;
+      xLabels += `<text class="axis-label" x="${x.toFixed(1)}" y="${y}" text-anchor="middle">${points[idx].index}</text>`;
     }
+    // "swipes" label at bottom right
+    xLabels += `<text class="axis-label" x="${W - padR}" y="${padT + chartH + 24}" text-anchor="end" style="font-size:8px">swipes</text>`;
 
-    // Latest accuracy value
+    // 50% annotation
+    const coinFlipLabel = `<text class="axis-label" x="${W - padR}" y="${(baseline50 - 3).toFixed(1)}" text-anchor="end" style="font-size:7px;fill:var(--gray)">coin flip</text>`;
+
     const latest = points[points.length - 1].accuracy;
 
     accuracyChartWrap.innerHTML = `
       <div class="accuracy-chart-wrap">
-        <div class="accuracy-chart-title">Prediction Accuracy Over Time <span style="float:right;color:var(--black);font-weight:700;">${latest}%</span></div>
-        <svg class="accuracy-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        <div class="accuracy-chart-title">
+          Swipe Prediction
+          <span style="float:right;color:var(--black);font-weight:700;">${latest}%</span>
+        </div>
+        <div style="font-size:11px;color:var(--gray);margin-bottom:8px;">How often OLI correctly guesses your swipe</div>
+        <svg class="accuracy-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
           ${gridLines}
           <line class="baseline" x1="${padL}" y1="${baseline50.toFixed(1)}" x2="${W - padR}" y2="${baseline50.toFixed(1)}"/>
+          ${coinFlipLabel}
           <polyline class="line" points="${coords.join(' ')}"/>
-          ${dateLabels}
+          ${xLabels}
         </svg>
       </div>
     `;
@@ -879,16 +883,15 @@
       const a = stats.accuracy;
       accuracyHtml = `
         <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
-          <div class="stat-row"><span class="stat-label" style="font-weight:700;">Prediction Accuracy</span><span class="stat-val">${a.pct}%</span></div>
-          <div class="stat-row"><span class="stat-label">Scored swipes</span><span class="stat-val">${a.total_scored}</span></div>
-          <div class="stat-row"><span class="stat-label">Avg score (liked)</span><span class="stat-val">${a.avg_liked_score}%</span></div>
-          <div class="stat-row"><span class="stat-label">Avg score (skipped)</span><span class="stat-val">${a.avg_skipped_score}%</span></div>
+          <div class="stat-row"><span class="stat-label" style="font-weight:700;">Correct predictions</span><span class="stat-val">${a.pct}% of ${a.total_scored} swipes</span></div>
+          <div class="stat-row"><span class="stat-label">Avg confidence on likes</span><span class="stat-val">${a.avg_liked_score}%</span></div>
+          <div class="stat-row"><span class="stat-label">Avg confidence on skips</span><span class="stat-val">${a.avg_skipped_score}%</span></div>
         </div>
       `;
     } else {
       accuracyHtml = `
         <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
-          <div class="stat-row"><span class="stat-label">Prediction Accuracy</span><span class="stat-val" style="color:var(--gray);">Need 10+ scored swipes</span></div>
+          <div class="stat-row"><span class="stat-label">Swipe prediction</span><span class="stat-val" style="color:var(--gray);">Need 10+ swipes</span></div>
         </div>
       `;
     }

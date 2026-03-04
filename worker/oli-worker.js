@@ -169,11 +169,11 @@ async function handleFeed(request, url, env) {
     const rankedCount = Math.ceil(limit * 0.8);
     const randomCount = limit - rankedCount;
 
-    // RPC now accepts neg_embedding for better scoring
+    // RPC — fetch more than needed, filter in JS (avoids passing huge UUID arrays to Postgres)
     const rpcParams = {
       query_embedding: posCentroid,
-      match_count: rankedCount + excludeSet.size,
-      exclude_ids: [...excludeSet]
+      match_count: rankedCount + Math.min(excludeSet.size, 200),
+      exclude_ids: [] // filter in JS instead — large arrays break Postgres
     };
     if (negCentroid) rpcParams.neg_embedding = negCentroid;
 
@@ -183,17 +183,20 @@ async function handleFeed(request, url, env) {
       return json({ listings: [] }, 200, request);
     }
 
+    // Filter out swiped items in JS
+    const rankedFiltered = ranked.filter(l => !excludeSet.has(l.id)).slice(0, rankedCount);
+
     // Random exploration — fetch a pool and filter in JS
     const randomRes = await supa(env,
       `listings?status=eq.active&hero_image=not.is.null&embedding=not.is.null&select=${selectFields}&order=scraped_at.desc&limit=${randomCount + 50}`
     );
     const randomPool = await randomRes.json();
-    const rankedIds = new Set((Array.isArray(ranked) ? ranked : []).map(r => r.id));
+    const rankedIds = new Set(rankedFiltered.map(r => r.id));
     const random = (Array.isArray(randomPool) ? randomPool : [])
       .filter(l => !excludeSet.has(l.id) && !rankedIds.has(l.id))
       .slice(0, randomCount);
 
-    listings = [...(Array.isArray(ranked) ? ranked : []), ...random];
+    listings = [...rankedFiltered, ...random];
   } else {
     // ── Cold start: fetch a big pool, filter + shuffle to mix auction houses ──
     const poolSize = Math.min(limit * 5 + excludeSet.size, 500);
