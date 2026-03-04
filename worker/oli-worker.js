@@ -440,18 +440,26 @@ async function handleFixHouses(request, env) {
 
 async function handleScrape(request, env) {
   try {
-    const { seller_id } = await request.json().catch(() => ({}));
+    const body = await request.json().catch(() => ({}));
 
-    if (seller_id) {
-      // Scrape a single house
-      const houseName = LA_SELLERS[seller_id] || 'Unknown';
-      const count = await scrapeSellerListings(env, parseInt(seller_id), houseName);
+    if (body.shopify) {
+      // Scrape a Shopify store by key
+      const count = await scrapeShopifyStore(env, body.shopify);
+      const store = SHOPIFY_STORES[body.shopify];
+      return json({ ok: true, new_listings: count, store: store?.name || body.shopify }, 200, request);
+    }
+
+    if (body.seller_id) {
+      // Scrape a single LiveAuctioneers house
+      const houseName = LA_SELLERS[body.seller_id] || 'Unknown';
+      const count = await scrapeSellerListings(env, parseInt(body.seller_id), houseName);
       return json({ ok: true, new_listings: count, house: houseName }, 200, request);
     }
 
-    // No seller_id: return list of houses to scrape (caller loops)
-    const houses = Object.entries(LA_SELLERS).map(([id, name]) => ({ id, name }));
-    return json({ houses, message: 'POST with {seller_id} to scrape one house' }, 200, request);
+    // No params: return all available sources
+    const laHouses = Object.entries(LA_SELLERS).map(([id, name]) => ({ id, name, type: 'liveauctioneers' }));
+    const shopifyStores = Object.entries(SHOPIFY_STORES).map(([key, s]) => ({ key, name: s.name, type: 'shopify' }));
+    return json({ sources: [...laHouses, ...shopifyStores], message: 'POST with {seller_id} or {shopify: "key"}' }, 200, request);
   } catch (e) {
     return json({ error: e.message, stack: e.stack }, 500, request);
   }
@@ -567,13 +575,13 @@ async function scrapeAll(env) {
     console.error('[OLI] LiveAuctioneers scrape failed:', e);
   }
 
-  // Craigslist (Phase 2)
-  // try {
-  //   const cl = await scrapeCraigslist(env);
-  //   total += cl;
-  // } catch (e) {
-  //   console.error('[OLI] Craigslist scrape failed:', e);
-  // }
+  // Shopify stores
+  try {
+    const sh = await scrapeAllShopify(env);
+    total += sh;
+  } catch (e) {
+    console.error('[OLI] Shopify scrape failed:', e);
+  }
 
   return total;
 }
@@ -593,7 +601,8 @@ const LA_SELLERS = {
   390:   'Uniques and Antiques, Inc.',
   3967:  'Cain Modern Auctions',
   176:   'Rago/Wright',
-  369:   'Wright'
+  369:   'Wright',
+  5584:  'Chairish Auctions'
 };
 
 const LA_SEARCH_URL = 'https://search-party-prod.liveauctioneers.com/search/v4/web';
@@ -715,14 +724,97 @@ function transformLAItem(item, sellerId, houseName) {
   };
 }
 
-async function scrapeCraigslist(env) {
-  // TODO: Phase 2
-  // 1. Fetch RSS: {city}.craigslist.org/search/ata?format=rss
-  // 2. Parse XML for titles, links, descriptions
-  // 3. Fetch individual pages for images
-  // 4. Upsert into Supabase
-  console.log('[OLI] Craigslist scraper: not yet implemented');
-  return 0;
+// ── Shopify Store Scraping ──────────────────────────────────
+
+const SHOPIFY_STORES = {
+  'blackmancruz': { url: 'https://www.blackmancruz.com', name: 'Blackman Cruz' },
+  'thewindowla':  { url: 'https://thewindowla.com',      name: 'The Window LA' },
+  'nickeykehoe':  { url: 'https://nickeykehoe.com',       name: 'Nickey Kehoe' }
+};
+
+async function scrapeShopifyStore(env, storeKey) {
+  const store = SHOPIFY_STORES[storeKey];
+  if (!store) return 0;
+
+  let totalNew = 0;
+  let page = 1;
+  const maxPages = 6;
+
+  while (page <= maxPages) {
+    const res = await fetch(`${store.url}/products.json?limit=250&page=${page}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
+    });
+
+    if (!res.ok) {
+      console.error(`[OLI] Shopify ${store.name} fetch failed: ${res.status}`);
+      break;
+    }
+
+    const data = await res.json();
+    const products = data?.products || [];
+    if (products.length === 0) break;
+
+    // Transform to our listing format
+    const batch = products.map(p => transformShopifyProduct(p, store)).filter(l => l.hero_image);
+
+    // Upsert
+    if (batch.length > 0) {
+      const upsertRes = await supa(env, 'listings', {
+        method: 'POST',
+        body: JSON.stringify(batch),
+        headers: { 'Prefer': 'return=representation,resolution=ignore-duplicates' }
+      });
+      const inserted = await upsertRes.json();
+      totalNew += Array.isArray(inserted) ? inserted.length : 0;
+    }
+
+    page++;
+    await sleep(500);
+  }
+
+  console.log(`[OLI] Shopify ${store.name}: ${totalNew} new listings`);
+  return totalNew;
+}
+
+function stripHtml(html) {
+  if (!html) return '';
+  return html.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function transformShopifyProduct(product, store) {
+  const images = (product.images || []).map(img => img.src);
+  const variant = product.variants?.[0] || {};
+  const price = parseFloat(variant.price) || null;
+  const available = variant.available !== false;
+
+  return {
+    platform: 'shopify',
+    platform_id: String(product.id),
+    title: product.title || 'Untitled',
+    description: stripHtml(product.body_html),
+    price,
+    currency: 'USD',
+    location: 'Los Angeles, CA',
+    url: `${store.url}/products/${product.handle}`,
+    image_urls: images,
+    hero_image: images[0] || null,
+    auction_house: store.name,
+    auction_date: product.published_at || null,
+    lot_number: null,
+    status: available ? 'active' : 'sold'
+  };
+}
+
+async function scrapeAllShopify(env) {
+  let total = 0;
+  for (const key of Object.keys(SHOPIFY_STORES)) {
+    try {
+      total += await scrapeShopifyStore(env, key);
+    } catch (e) {
+      console.error(`[OLI] Shopify ${key} failed:`, e);
+    }
+  }
+  return total;
 }
 
 // ── AI Processing ─────────────────────────────────────────
