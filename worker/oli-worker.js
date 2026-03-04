@@ -119,13 +119,13 @@ async function handleFeed(request, url, env) {
   const excludeRaw = url.searchParams.get('exclude') || '';
   const clientExcludeIds = excludeRaw ? excludeRaw.split(',').filter(Boolean) : [];
 
-  // Fetch all previously-swiped listing IDs from server (dedupes across devices)
+  // Fetch swiped IDs from server (dedupes across devices)
   const swipedRes = await supa(env, 'swipes?select=listing_id');
   const swipedRows = await swipedRes.json();
   const serverSwipedIds = (Array.isArray(swipedRows) ? swipedRows : []).map(r => r.listing_id);
 
-  // Merge client + server exclude lists
-  const excludeIds = [...new Set([...clientExcludeIds, ...serverSwipedIds])];
+  // Build a Set for fast JS-side filtering (avoids URL length limits)
+  const excludeSet = new Set([...clientExcludeIds, ...serverSwipedIds]);
 
   // Get taste profile
   const profileRes = await supa(env, 'taste_profile?id=eq.1&select=*');
@@ -135,44 +135,43 @@ async function handleFeed(request, url, env) {
   let listings;
 
   const selectFields = 'id,platform,platform_id,title,description,price,location,url,hero_image,image_urls,auction_house,auction_date,lot_number,ai_description';
-  const excludeFilter = excludeIds.length > 0
-    ? `&id=not.in.(${excludeIds.join(',')})`
-    : '';
 
   if (profile && profile.positive_centroid && profile.positive_count >= 10) {
     // ── Ranked mode: use taste model ──
     const rankedCount = Math.ceil(limit * 0.8);
     const randomCount = limit - rankedCount;
 
+    // RPC handles exclude_ids natively in SQL
     const matchRes = await supaRpc(env, 'match_listings', {
       query_embedding: profile.positive_centroid,
-      match_count: rankedCount,
-      exclude_ids: excludeIds
+      match_count: rankedCount + excludeSet.size, // over-fetch to compensate for filtering
+      exclude_ids: [...excludeSet]
     });
     const ranked = await matchRes.json();
 
-    // Random exploration (exclude ranked IDs too)
-    const rankedIds = (Array.isArray(ranked) ? ranked : []).map(r => r.id);
-    const allExcludeFilter = [...excludeIds, ...rankedIds].length > 0
-      ? `&id=not.in.(${[...excludeIds, ...rankedIds].join(',')})`
-      : '';
+    // Random exploration — fetch a pool and filter in JS
     const randomRes = await supa(env,
-      `listings?status=eq.active&hero_image=not.is.null&embedding=not.is.null${allExcludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${randomCount}`
+      `listings?status=eq.active&hero_image=not.is.null&embedding=not.is.null&select=${selectFields}&order=scraped_at.desc&limit=${randomCount + 50}`
     );
-    const random = await randomRes.json();
+    const randomPool = await randomRes.json();
+    const rankedIds = new Set((Array.isArray(ranked) ? ranked : []).map(r => r.id));
+    const random = (Array.isArray(randomPool) ? randomPool : [])
+      .filter(l => !excludeSet.has(l.id) && !rankedIds.has(l.id))
+      .slice(0, randomCount);
 
-    listings = [...(Array.isArray(ranked) ? ranked : []), ...(Array.isArray(random) ? random : [])];
+    listings = [...(Array.isArray(ranked) ? ranked : []), ...random];
   } else {
-    // ── Cold start: fetch a big pool and shuffle to mix auction houses ──
-    const poolSize = Math.min(limit * 5, 200);
+    // ── Cold start: fetch a big pool, filter + shuffle to mix auction houses ──
+    const poolSize = Math.min(limit * 5 + excludeSet.size, 500);
     const res = await supa(env,
-      `listings?status=eq.active&hero_image=not.is.null${excludeFilter}&select=${selectFields}&order=scraped_at.desc&limit=${poolSize}`
+      `listings?status=eq.active&hero_image=not.is.null&select=${selectFields}&order=scraped_at.desc&limit=${poolSize}`
     );
     const pool = await res.json();
-    listings = shuffle(pool || []).slice(0, limit);
+    const filtered = (Array.isArray(pool) ? pool : []).filter(l => !excludeSet.has(l.id));
+    listings = shuffle(filtered).slice(0, limit);
   }
 
-  // Also shuffle ranked results to avoid runs of similar items
+  // Shuffle to avoid runs of similar items
   listings = shuffle(listings || []);
 
   return json({ listings }, 200, request);
