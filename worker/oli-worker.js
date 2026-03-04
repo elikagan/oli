@@ -83,23 +83,17 @@ export default {
     const idx = Math.floor(hour / 4) % sellerIds.length; // 6 cron runs/day, rotate through houses
     const sellerId = parseInt(sellerIds[idx]);
     const houseName = LA_SELLERS[sellerId];
-    // Also scrape Craigslist every other run (every 8h)
-    const runCL = (hour % 8 === 0);
+    // Also scrape one Craigslist category per run (rotates through 5 searches)
+    const clIdx = Math.floor(hour / 4) % CL_SEARCHES.length;
+    const clSearch = CL_SEARCHES[clIdx];
     ctx.waitUntil(
       Promise.all([
         scrapeSellerListings(env, sellerId, houseName)
           .then(count => console.log(`[OLI] Cron scraped ${houseName}: ${count} new`))
           .catch(e => console.error(`[OLI] Cron failed for ${houseName}:`, e)),
-        runCL ? (async () => {
-          for (const search of CL_SEARCHES) {
-            try {
-              const count = await scrapeCraigslistSearch(env, search);
-              console.log(`[OLI] Cron CL ${search.name}: ${count} new`);
-            } catch (e) {
-              console.error(`[OLI] Cron CL ${search.name} failed:`, e);
-            }
-          }
-        })() : Promise.resolve()
+        scrapeCraigslistSearch(env, clSearch)
+          .then(count => console.log(`[OLI] Cron CL ${clSearch.name}: ${count} new`))
+          .catch(e => console.error(`[OLI] Cron CL ${clSearch.name} failed:`, e))
       ])
     );
   }
@@ -1346,19 +1340,35 @@ async function scrapeAllShopify(env) {
 // ── Craigslist Scraping ──────────────────────────────────
 
 const CL_SEARCHES = [
-  { url: 'https://losangeles.craigslist.org/search/ata', name: 'LA Antiques', category: 'antiques' }
+  { url: 'https://losangeles.craigslist.org/search/ata', name: 'LA Antiques' },
+  { url: 'https://losangeles.craigslist.org/search/ara', name: 'LA Art' },
+  { url: 'https://losangeles.craigslist.org/search/fua?query=vintage', name: 'LA Vintage Furniture' },
+  { url: 'https://losangeles.craigslist.org/search/fua?query=mid+century', name: 'LA MCM Furniture' },
+  { url: 'https://losangeles.craigslist.org/search/fua?query=lamp', name: 'LA Lamps' },
+  { url: 'https://losangeles.craigslist.org/search/fua?query=sculpture', name: 'LA Sculpture' }
 ];
 
 const CL_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 async function handleScrapeCraigslist(request, env) {
   try {
-    let total = 0;
-    for (const search of CL_SEARCHES) {
+    // Only scrape ONE search per call to stay under subrequest limit
+    // Rotate through searches using a simple index
+    const url = new URL(request.url);
+    const idxParam = url.searchParams.get('idx');
+    const idx = idxParam != null ? parseInt(idxParam) : null;
+
+    if (idx != null && idx >= 0 && idx < CL_SEARCHES.length) {
+      // Scrape a specific search
+      const search = CL_SEARCHES[idx];
       const count = await scrapeCraigslistSearch(env, search);
-      total += count;
+      return json({ ok: true, new_listings: count, search: search.name, next_idx: (idx + 1) % CL_SEARCHES.length }, 200, request);
     }
-    return json({ ok: true, new_listings: total }, 200, request);
+
+    // Default: scrape the first one, return next index
+    const search = CL_SEARCHES[0];
+    const count = await scrapeCraigslistSearch(env, search);
+    return json({ ok: true, new_listings: count, search: search.name, total_searches: CL_SEARCHES.length, next_idx: 1 }, 200, request);
   } catch (e) {
     return json({ error: e.message }, 500, request);
   }
