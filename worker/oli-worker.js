@@ -41,6 +41,9 @@ export default {
       if (url.pathname === '/stats/accuracy-history' && request.method === 'GET')
         return handleAccuracyHistory(request, env);
 
+      if (url.pathname === '/debug/swipe-dupes' && request.method === 'GET')
+        return handleSwipeDupes(request, url, env);
+
       if (url.pathname === '/fix-houses' && request.method === 'POST')
         return handleFixHouses(request, env);
 
@@ -135,11 +138,29 @@ function supaRpc(env, fnName, params = {}) {
 async function handleFeed(request, url, env) {
   const limit = parseInt(url.searchParams.get('limit') || '20');
 
-  // Fetch swiped IDs from server
-  const swipedRes = await supa(env, 'swipes?select=listing_id');
-  const swipedRows = await swipedRes.json();
-  const swipedIds = (Array.isArray(swipedRows) ? swipedRows : []).map(r => r.listing_id);
+  // Fetch ALL swiped IDs with pagination (Supabase caps at 1000 per request)
+  let swipedIds = [];
+  let page = 0;
+  const PAGE_SIZE = 1000;
+  while (true) {
+    const from = page * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+    const res = await fetch(`${env.SUPABASE_URL}/rest/v1/swipes?select=listing_id`, {
+      headers: {
+        'apikey': env.SUPABASE_SERVICE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        'Range': `${from}-${to}`
+      }
+    });
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    swipedIds = swipedIds.concat(rows.map(r => r.listing_id));
+    if (rows.length < PAGE_SIZE) break;
+    page++;
+  }
   const swipedSet = new Set(swipedIds);
+  const _debugInfo = { swipe_rows: swipedIds.length, swiped_unique: swipedSet.size };
 
   // Get taste profile
   const profileRes = await supa(env, 'taste_profile?id=eq.1&select=*');
@@ -165,31 +186,50 @@ async function handleFeed(request, url, env) {
     const rankedCount = Math.ceil(limit * 0.8);
     const randomCount = limit - rankedCount;
 
-    // Pass swiped IDs to Postgres for exclusion (RPC body, no URL length issue)
+    // Fetch more from RPC to account for JS-side filtering of swiped items
     const rpcParams = {
       query_embedding: posCentroid,
-      match_count: rankedCount + 20,
-      exclude_ids: swipedIds
+      match_count: swipedSet.size + limit + 50
     };
     if (negCentroid) rpcParams.neg_embedding = negCentroid;
 
     const matchRes = await supaRpc(env, 'match_listings', rpcParams);
     const ranked = await matchRes.json();
+    _debugInfo.rpc_status = matchRes.status;
+    _debugInfo.ranked_count = Array.isArray(ranked) ? ranked.length : 'not_array';
     if (!Array.isArray(ranked)) {
-      return json({ listings: [] }, 200, request);
+      _debugInfo.rpc_error = JSON.stringify(ranked).slice(0, 200);
+      return json({ listings: [], _debug: _debugInfo }, 200, request);
     }
 
-    const rankedFiltered = ranked.slice(0, rankedCount);
+    // Filter out already-swiped items in JS
+    const rankedFiltered = ranked.filter(l => !swipedSet.has(l.id)).slice(0, rankedCount);
+    _debugInfo.ranked_after_filter = rankedFiltered.length;
 
-    // Random exploration
+    // Random exploration (include listings without embeddings, paginate to find unswiped)
     const rankedIds = new Set(rankedFiltered.map(r => r.id));
-    const randomRes = await supa(env,
-      `listings?status=eq.active&hero_image=not.is.null&embedding=not.is.null&select=${selectFields}&order=scraped_at.desc&limit=${randomCount + 50}`
-    );
-    const randomPool = await randomRes.json();
-    const random = (Array.isArray(randomPool) ? randomPool : [])
-      .filter(l => !swipedSet.has(l.id) && !rankedIds.has(l.id))
-      .slice(0, randomCount);
+    let randomAll = [];
+    for (let rp = 0; rp < 5; rp++) {
+      const from = rp * 1000;
+      const to = from + 999;
+      const randomRes = await fetch(`${env.SUPABASE_URL}/rest/v1/listings?status=eq.active&hero_image=not.is.null&select=${selectFields}&order=scraped_at.desc`, {
+        headers: {
+          'apikey': env.SUPABASE_SERVICE_KEY,
+          'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json',
+          'Range': `${from}-${to}`
+        }
+      });
+      const batch = await randomRes.json();
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      const unswiped = batch.filter(l => !swipedSet.has(l.id) && !rankedIds.has(l.id));
+      randomAll = randomAll.concat(unswiped);
+      if (randomAll.length >= limit) break; // Got enough
+      if (batch.length < 1000) break; // No more pages
+    }
+    const random = shuffle(randomAll).slice(0, Math.max(randomCount, limit - rankedFiltered.length));
+    _debugInfo.random_found = randomAll.length;
+    _debugInfo.random_used = random.length;
 
     listings = [...rankedFiltered, ...random];
   } else {
@@ -224,6 +264,61 @@ async function handleFeed(request, url, env) {
   listings = shuffle(listings || []);
 
   return json({ listings }, 200, request);
+}
+
+async function handleSwipeDupes(request, url, env) {
+  // Find listings swiped more than once
+  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/swipes?select=listing_id,action,created_at&order=created_at.desc`, {
+    headers: {
+      'apikey': env.SUPABASE_SERVICE_KEY,
+      'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+      'Range': '0-99999',
+      'Content-Type': 'application/json'
+    }
+  });
+  const rows = await res.json();
+  if (!Array.isArray(rows)) return json({ error: 'failed to fetch swipes' }, 500, request);
+
+  // Count swipes per listing
+  const counts = {};
+  rows.forEach(r => {
+    if (!counts[r.listing_id]) counts[r.listing_id] = [];
+    counts[r.listing_id].push({ action: r.action, at: r.created_at });
+  });
+
+  const dupes = Object.entries(counts)
+    .filter(([, swipes]) => swipes.length > 1)
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 20);
+
+  // Get titles for dupe listings
+  const dupeIds = dupes.map(([id]) => id);
+  let titles = {};
+  if (dupeIds.length > 0) {
+    const listRes = await supa(env, `listings?id=in.(${dupeIds.join(',')})&select=id,title`);
+    const listRows = await listRes.json();
+    if (Array.isArray(listRows)) listRows.forEach(l => titles[l.id] = l.title);
+  }
+
+  // Also show most recent 5 swipes
+  const recent = rows.slice(0, 5).map(r => ({
+    listing_id: r.listing_id,
+    action: r.action,
+    at: r.created_at,
+    title: titles[r.listing_id] || '?'
+  }));
+
+  return json({
+    total_swipes: rows.length,
+    unique_listings_swiped: Object.keys(counts).length,
+    duplicates: dupes.map(([id, swipes]) => ({
+      listing_id: id,
+      title: titles[id] || '?',
+      swipe_count: swipes.length,
+      swipes
+    })),
+    recent_5: recent
+  }, 200, request);
 }
 
 function shuffle(arr) {
