@@ -119,8 +119,7 @@
 
   async function fetchFeed() {
     try {
-      const excluded = [...swipedIds];
-      const data = await apiFetch('/feed?limit=' + BATCH_SIZE + '&exclude=' + excluded.join(','));
+      const data = await apiFetch('/feed?limit=' + BATCH_SIZE);
       return data.listings || [];
     } catch (e) {
       console.error('Feed fetch failed:', e);
