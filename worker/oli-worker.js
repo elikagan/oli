@@ -44,6 +44,15 @@ export default {
       if (url.pathname === '/rebuild-taste' && request.method === 'POST')
         return handleRebuildTaste(request, env);
 
+      if (url.pathname === '/migrate' && request.method === 'POST')
+        return handleMigrate(request, env);
+
+      if (url.pathname === '/artists' && request.method === 'GET')
+        return handleGetArtists(request, env);
+
+      if (url.pathname === '/artists' && request.method === 'POST')
+        return handleImportArtists(request, env);
+
       return new Response('Not found', { status: 404, headers: corsHeaders(request) });
     } catch (e) {
       console.error('Worker error:', e);
@@ -137,19 +146,32 @@ async function handleFeed(request, url, env) {
 
   let listings;
 
-  const selectFields = 'id,platform,platform_id,title,description,price,location,url,hero_image,image_urls,auction_house,auction_date,lot_number,ai_description';
+  const selectFields = 'id,platform,platform_id,title,description,price,location,url,hero_image,image_urls,auction_house,auction_date,lot_number,ai_description,maker';
 
-  if (profile && profile.positive_centroid && profile.positive_count >= 10) {
-    // ── Ranked mode: use taste model ──
+  // Parse centroids (pgvector returns strings)
+  const parseCentroid = (c) => {
+    if (!c) return null;
+    if (Array.isArray(c)) return c;
+    if (typeof c === 'string') { try { return JSON.parse(c); } catch { return null; } }
+    return null;
+  };
+  const posCentroid = parseCentroid(profile?.positive_centroid);
+  const negCentroid = parseCentroid(profile?.negative_centroid);
+
+  if (posCentroid && (profile?.positive_count || 0) >= 10) {
+    // ── Ranked mode: use taste model with negative centroid ──
     const rankedCount = Math.ceil(limit * 0.8);
     const randomCount = limit - rankedCount;
 
-    // RPC handles exclude_ids natively in SQL
-    const matchRes = await supaRpc(env, 'match_listings', {
-      query_embedding: profile.positive_centroid,
-      match_count: rankedCount + excludeSet.size, // over-fetch to compensate for filtering
+    // RPC now accepts neg_embedding for better scoring
+    const rpcParams = {
+      query_embedding: posCentroid,
+      match_count: rankedCount + excludeSet.size,
       exclude_ids: [...excludeSet]
-    });
+    };
+    if (negCentroid) rpcParams.neg_embedding = negCentroid;
+
+    const matchRes = await supaRpc(env, 'match_listings', rpcParams);
     const ranked = await matchRes.json();
 
     // Random exploration — fetch a pool and filter in JS
@@ -418,6 +440,133 @@ async function handleRebuildTaste(request, env) {
     positive_count: posCount, negative_count: negCount
   }, 200, request);
 
+  } catch (e) {
+    return json({ error: e.message, stack: e.stack }, 500, request);
+  }
+}
+
+// ── POST /migrate ────────────────────────────────────────
+
+async function supaSQL(env, query) {
+  // Use Supabase's raw SQL endpoint (requires service_role key)
+  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/exec_sql`, {
+    method: 'POST',
+    headers: {
+      'apikey': env.SUPABASE_SERVICE_KEY,
+      'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ query })
+  });
+  return { status: res.status, ok: res.ok, body: await res.text() };
+}
+
+async function handleMigrate(request, env) {
+  // Return the SQL that needs to be run manually in Supabase SQL Editor
+  const sql = `
+-- 1. Add maker column to listings
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS maker TEXT;
+
+-- 2. Create artists table
+CREATE TABLE IF NOT EXISTS artists (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  birth_year INT,
+  age INT,
+  location TEXT,
+  medium TEXT,
+  rep_status TEXT,
+  rep_label TEXT,
+  priority TEXT,
+  tags TEXT,
+  links TEXT[],
+  notes TEXT,
+  source TEXT DEFAULT 'manual',
+  listing_count INT DEFAULT 0,
+  avg_price NUMERIC,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 3. RLS for artists table
+ALTER TABLE artists ENABLE ROW LEVEL SECURITY;
+CREATE POLICY IF NOT EXISTS "anon_read_artists" ON artists FOR SELECT TO anon USING (true);
+CREATE POLICY IF NOT EXISTS "service_write_artists" ON artists FOR ALL TO service_role USING (true);
+
+-- 4. Update match_listings to support negative centroid + return maker + similarity
+CREATE OR REPLACE FUNCTION match_listings(
+  query_embedding VECTOR(768),
+  neg_embedding VECTOR(768) DEFAULT NULL,
+  match_count INT DEFAULT 20,
+  exclude_ids UUID[] DEFAULT '{}'
+)
+RETURNS TABLE (
+  id UUID, platform TEXT, platform_id TEXT, title TEXT, description TEXT,
+  price NUMERIC, location TEXT, url TEXT, hero_image TEXT, image_urls TEXT[],
+  auction_house TEXT, auction_date TIMESTAMPTZ, lot_number TEXT,
+  ai_description TEXT, maker TEXT, similarity FLOAT
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    l.id, l.platform, l.platform_id, l.title, l.description,
+    l.price, l.location, l.url, l.hero_image, l.image_urls,
+    l.auction_house, l.auction_date, l.lot_number,
+    l.ai_description, l.maker,
+    CASE
+      WHEN neg_embedding IS NOT NULL THEN
+        (1 - (l.embedding <=> query_embedding))::FLOAT - 0.3 * (1 - (l.embedding <=> neg_embedding))::FLOAT
+      ELSE
+        (1 - (l.embedding <=> query_embedding))::FLOAT
+    END AS similarity
+  FROM listings l
+  WHERE l.status = 'active'
+    AND l.embedding IS NOT NULL
+    AND l.hero_image IS NOT NULL
+    AND NOT (l.id = ANY(exclude_ids))
+  ORDER BY similarity DESC
+  LIMIT match_count;
+END;
+$$;
+  `.trim();
+
+  return json({
+    message: 'Run this SQL in Supabase SQL Editor (https://supabase.com/dashboard → SQL Editor)',
+    sql
+  }, 200, request);
+}
+
+// ── GET /artists ─────────────────────────────────────────
+
+async function handleGetArtists(request, env) {
+  const res = await supa(env, 'artists?select=*&order=priority.asc,name.asc');
+  const artists = await res.json();
+  return json({ artists: artists || [] }, 200, request);
+}
+
+// ── POST /artists ────────────────────────────────────────
+
+async function handleImportArtists(request, env) {
+  try {
+    const artists = await request.json();
+    if (!Array.isArray(artists)) {
+      return json({ error: 'Expected JSON array of artists' }, 400, request);
+    }
+
+    // Upsert by name
+    const res = await supa(env, 'artists', {
+      method: 'POST',
+      body: JSON.stringify(artists),
+      headers: {
+        'Prefer': 'return=representation,resolution=merge-duplicates'
+      }
+    });
+    const result = await res.json();
+    return json({
+      ok: true,
+      imported: Array.isArray(result) ? result.length : 0
+    }, 200, request);
   } catch (e) {
     return json({ error: e.message, stack: e.stack }, 500, request);
   }
@@ -787,6 +936,10 @@ function transformShopifyProduct(product, store) {
   const price = parseFloat(variant.price) || null;
   const available = variant.available !== false;
 
+  // Extract maker from vendor (Shopify stores often use this for artist/designer name)
+  const vendor = product.vendor || '';
+  const maker = (vendor && vendor !== store.name && vendor !== 'The Window') ? vendor : null;
+
   return {
     platform: 'shopify',
     platform_id: String(product.id),
@@ -801,6 +954,7 @@ function transformShopifyProduct(product, store) {
     auction_house: store.name,
     auction_date: product.published_at || null,
     lot_number: null,
+    maker,
     status: available ? 'active' : 'sold'
   };
 }

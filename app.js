@@ -200,18 +200,24 @@
     ].filter(Boolean).join(' \u00B7 ');
 
     const heroUrl = listing.hero_image || '';
+    const price = listing.price ? '$' + Number(listing.price).toLocaleString() : '';
+    const score = listing.similarity != null ? Math.round(listing.similarity * 100) : null;
+    const maker = listing.maker || '';
 
     card.innerHTML = `
       <div class="card-image" style="background-color: #f0f0f0">
         <span class="card-badge">${esc(listing.platform)}</span>
+        ${score !== null ? `<span class="card-score">${score}%</span>` : ''}
         <div class="card-overlay like">LIKE</div>
         <div class="card-overlay skip">SKIP</div>
         <div class="card-overlay fav">\u2605</div>
       </div>
       <div class="card-info">
         <div class="card-title">${esc(listing.title)}</div>
+        ${maker ? `<div class="card-maker">${esc(maker)}</div>` : ''}
         <div class="card-meta">
           <span>${esc(meta)}</span>
+          ${price ? `<span class="card-price">${price}</span>` : ''}
         </div>
       </div>
     `;
