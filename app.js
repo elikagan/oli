@@ -682,8 +682,8 @@
       return;
     }
 
-    const W = 300, H = 100;
-    const padL = 28, padR = 8, padT = 8, padB = 16;
+    const W = 300, H = 120;
+    const padL = 28, padR = 8, padT = 8, padB = 28;
     const chartW = W - padL - padR;
     const chartH = H - padT - padB;
 
@@ -710,6 +710,20 @@
     // 50% baseline
     const baseline50 = padT + chartH - ((50 - minY) / rangeY) * chartH;
 
+    // X-axis date labels — pick ~4 evenly spaced points
+    let dateLabels = '';
+    const labelCount = Math.min(4, points.length);
+    const fmt = (iso) => {
+      const d = new Date(iso);
+      return `${d.getMonth() + 1}/${d.getDate()}`;
+    };
+    for (let i = 0; i < labelCount; i++) {
+      const idx = labelCount === 1 ? 0 : Math.round(i * (points.length - 1) / (labelCount - 1));
+      const x = padL + (idx / Math.max(1, points.length - 1)) * chartW;
+      const y = padT + chartH + 14;
+      dateLabels += `<text class="axis-label" x="${x.toFixed(1)}" y="${y}" text-anchor="middle">${fmt(points[idx].date)}</text>`;
+    }
+
     // Latest accuracy value
     const latest = points[points.length - 1].accuracy;
 
@@ -720,6 +734,7 @@
           ${gridLines}
           <line class="baseline" x1="${padL}" y1="${baseline50.toFixed(1)}" x2="${W - padR}" y2="${baseline50.toFixed(1)}"/>
           <polyline class="line" points="${coords.join(' ')}"/>
+          ${dateLabels}
         </svg>
       </div>
     `;
