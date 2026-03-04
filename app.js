@@ -510,45 +510,87 @@
   }
 
   // ── Pull to Refresh ───────────────────────────────────
+  const pullIndicator = document.getElementById('pull-indicator');
+  const scoutContent = document.getElementById('scout-content');
   let pullStartY = 0;
   let isPulling = false;
-  let pullTriggered = false;
-  const PULL_THRESHOLD = 60;
+  let isRefreshing = false;
+  const PULL_THRESHOLD = 70;
+  const PULL_MAX = 120;
 
   function initPullToRefresh() {
-    // Listen on the whole document so it works even over the empty state
     document.addEventListener('touchstart', (e) => {
-      if (currentTab !== 'scout') return;
+      if (currentTab !== 'scout' || isRefreshing) return;
       if (e.target.closest('.card') || e.target.closest('.action-btn') || e.target.closest('#tabbar') || e.target.closest('#topbar')) return;
       pullStartY = e.touches[0].clientY;
       isPulling = true;
-      pullTriggered = false;
     }, { passive: true });
 
     document.addEventListener('touchmove', (e) => {
-      if (!isPulling || currentTab !== 'scout') return;
+      if (!isPulling || currentTab !== 'scout' || isRefreshing) return;
       const dy = e.touches[0].clientY - pullStartY;
-      if (dy > 10) {
-        const progress = Math.min(dy / PULL_THRESHOLD, 1);
-        loadingEl.classList.remove('hidden');
-        loadingEl.style.opacity = String(progress * 0.8 + 0.2);
-        loadingEl.style.transform = `scale(${0.6 + progress * 0.4})`;
-        if (progress >= 1) pullTriggered = true;
+      if (dy > 0) {
+        // Rubber-band: diminishing returns past threshold
+        const pull = Math.min(dy * 0.5, PULL_MAX);
+        scoutContent.style.transition = 'none';
+        scoutContent.style.transform = `translateY(${pull}px)`;
+        pullIndicator.style.transition = 'none';
+        pullIndicator.style.top = `${pull - 40}px`;
+        pullIndicator.classList.add('visible');
+
+        // Rotate spinner based on pull progress (visual feedback before spinning)
+        const spinnerEl = pullIndicator.querySelector('.spinner');
+        if (dy < PULL_THRESHOLD) {
+          const angle = (dy / PULL_THRESHOLD) * 360;
+          spinnerEl.style.animation = 'none';
+          spinnerEl.style.transform = `rotate(${angle}deg)`;
+          spinnerEl.style.borderTopColor = 'var(--light)';
+        } else {
+          // Past threshold — start spinning and darken
+          spinnerEl.style.animation = '';
+          spinnerEl.style.transform = '';
+          spinnerEl.style.borderTopColor = 'var(--black)';
+        }
       }
     }, { passive: true });
 
     document.addEventListener('touchend', async () => {
-      if (!isPulling) return;
+      if (!isPulling || isRefreshing) return;
       isPulling = false;
 
-      if (pullTriggered && currentTab === 'scout') {
-        loadingEl.style.opacity = '';
-        loadingEl.style.transform = '';
-        await doRefresh();
+      const currentY = parseFloat(scoutContent.style.transform.replace(/[^0-9.-]/g, '')) || 0;
+
+      if (currentY >= PULL_THRESHOLD * 0.5) {
+        // Triggered — hold at a small offset while loading
+        isRefreshing = true;
+        scoutContent.style.transition = 'transform 0.3s cubic-bezier(0.2, 0, 0, 1)';
+        scoutContent.style.transform = 'translateY(50px)';
+        pullIndicator.style.transition = 'top 0.3s cubic-bezier(0.2, 0, 0, 1)';
+        pullIndicator.style.top = '10px';
+        const spinnerEl = pullIndicator.querySelector('.spinner');
+        spinnerEl.style.animation = '';
+        spinnerEl.style.transform = '';
+        spinnerEl.style.borderTopColor = 'var(--black)';
+
+        // Do the actual refresh
+        feedIndex = 0;
+        feed = await fetchFeed();
+        renderCards();
+
+        // Snap back
+        scoutContent.style.transition = 'transform 0.3s cubic-bezier(0.2, 0, 0, 1)';
+        scoutContent.style.transform = '';
+        pullIndicator.style.transition = 'top 0.3s, opacity 0.2s';
+        pullIndicator.style.top = '-50px';
+        pullIndicator.classList.remove('visible');
+        isRefreshing = false;
       } else {
-        loadingEl.classList.add('hidden');
-        loadingEl.style.opacity = '';
-        loadingEl.style.transform = '';
+        // Not enough pull — snap back
+        scoutContent.style.transition = 'transform 0.3s cubic-bezier(0.2, 0, 0, 1)';
+        scoutContent.style.transform = '';
+        pullIndicator.style.transition = 'top 0.3s, opacity 0.2s';
+        pullIndicator.style.top = '-50px';
+        pullIndicator.classList.remove('visible');
       }
     });
   }
@@ -576,15 +618,13 @@
 
   async function doRefresh() {
     loadingEl.classList.remove('hidden');
-    loadingEl.style.opacity = '';
-    loadingEl.style.transform = '';
     cardStack.innerHTML = '';
     emptyState.classList.add('hidden');
     actionBtns.classList.add('hidden');
     feedIndex = 0;
     feed = await fetchFeed();
-    renderCards();
     loadingEl.classList.add('hidden');
+    renderCards();
   }
 
   // ── Investigate List ────────────────────────────────────

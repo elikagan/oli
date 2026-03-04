@@ -32,21 +32,26 @@
 
   <!-- Swipe Screen -->
   <main id="scout-view" class="view">
-    <div id="loading" class="loading-state hidden">
+    <div id="pull-indicator" class="pull-indicator">
       <div class="spinner"></div>
-      <p class="loading-text">Loading listings…</p>
     </div>
-    <div id="card-stack" class="card-stack">
-      <!-- Cards injected by JS -->
-    </div>
-    <div id="empty-state" class="empty-state hidden">
-      <p>No more listings to review.</p>
-      <p class="empty-sub">Check back later for new listings.</p>
-    </div>
-    <div id="action-btns" class="action-btns hidden">
-      <button id="hate-btn" class="action-btn hate-btn" aria-label="Super Hate">&#128465;</button>
-      <button id="fav-btn" class="action-btn fav-btn" aria-label="Favorite">&#9733;</button>
-      <button id="super-btn" class="action-btn super-btn" aria-label="Super Like">&#128293;</button>
+    <div id="scout-content" class="scout-content">
+      <div id="loading" class="loading-state hidden">
+        <div class="spinner"></div>
+        <p class="loading-text">Loading listings…</p>
+      </div>
+      <div id="card-stack" class="card-stack">
+        <!-- Cards injected by JS -->
+      </div>
+      <div id="empty-state" class="empty-state hidden">
+        <p>No more listings to review.</p>
+        <p class="empty-sub">Check back later for new listings.</p>
+      </div>
+      <div id="action-btns" class="action-btns hidden">
+        <button id="hate-btn" class="action-btn hate-btn" aria-label="Super Hate">&#128465;</button>
+        <button id="fav-btn" class="action-btn fav-btn" aria-label="Favorite">&#9733;</button>
+        <button id="super-btn" class="action-btn super-btn" aria-label="Super Like">&#128293;</button>
+      </div>
     </div>
   </main>
 
