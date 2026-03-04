@@ -41,6 +41,9 @@ export default {
       if (url.pathname === '/fix-houses' && request.method === 'POST')
         return handleFixHouses(request, env);
 
+      if (url.pathname === '/rebuild-taste' && request.method === 'POST')
+        return handleRebuildTaste(request, env);
+
       return new Response('Not found', { status: 404, headers: corsHeaders(request) });
     } catch (e) {
       console.error('Worker error:', e);
@@ -317,6 +320,107 @@ async function handleStats(request, env) {
     favorites_count: favCount,
     active_listings: listingCount
   }, 200, request);
+}
+
+// ── POST /rebuild-taste ──────────────────────────────────
+
+async function handleRebuildTaste(request, env) {
+  try {
+  // Incremental rebuild: process a batch of swipes each call
+  // Accepts ?reset=1 to start fresh, otherwise continues from current profile
+  const url = new URL(request.url);
+  const reset = url.searchParams.get('reset') === '1';
+  const batchOffset = parseInt(url.searchParams.get('offset') || '0');
+  const batchSize = 10; // Stay well under 50 subrequest limit
+
+  // Get current profile (or reset)
+  if (reset) {
+    await supa(env, 'taste_profile?id=eq.1', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        positive_centroid: null, negative_centroid: null,
+        positive_count: 0, negative_count: 0,
+        updated_at: new Date().toISOString()
+      })
+    });
+  }
+
+  // Fetch a batch of swipes
+  const swipesRes = await supa(env,
+    `swipes?select=listing_id,action&order=created_at.asc&limit=${batchSize}&offset=${batchOffset}`
+  );
+  const swipes = await swipesRes.json();
+  if (!Array.isArray(swipes) || swipes.length === 0) {
+    return json({ ok: true, done: true, offset: batchOffset, message: 'All swipes processed' }, 200, request);
+  }
+
+  // Get current profile
+  const profRes = await supa(env, 'taste_profile?id=eq.1&select=*');
+  const profiles = await profRes.json();
+  let profile = profiles[0] || { positive_centroid: null, negative_centroid: null, positive_count: 0, negative_count: 0 };
+
+  // pgvector may return centroids as strings — parse them
+  const parseCentroid = (c) => {
+    if (!c) return null;
+    if (Array.isArray(c)) return c;
+    if (typeof c === 'string') {
+      try { return JSON.parse(c); } catch { return null; }
+    }
+    return null;
+  };
+  let posCentroid = parseCentroid(profile.positive_centroid);
+  let negCentroid = parseCentroid(profile.negative_centroid);
+  let posCount = profile.positive_count || 0;
+  let negCount = profile.negative_count || 0;
+  let processed = 0, skipped = 0;
+
+  // Process each swipe individually (fetch embedding one at a time to stay under limits)
+  for (const swipe of swipes) {
+    const listRes = await supa(env, `listings?id=eq.${swipe.listing_id}&select=embedding`);
+    const listings = await listRes.json();
+    const rawEmb = listings?.[0]?.embedding;
+    const embedding = parseCentroid(rawEmb);
+
+    if (!embedding) { skipped++; continue; }
+
+    const side = (swipe.action === 'left' || swipe.action === 'super_hate') ? 'negative' : 'positive';
+    const weight = (swipe.action === 'super_hate' || swipe.action === 'super_like') ? 25 : 1;
+
+    if (side === 'positive') {
+      const newCount = posCount + weight;
+      posCentroid = !posCentroid ? embedding
+        : posCentroid.map((v, i) => (v * posCount + embedding[i] * weight) / newCount);
+      posCount = newCount;
+    } else {
+      const newCount = negCount + weight;
+      negCentroid = !negCentroid ? embedding
+        : negCentroid.map((v, i) => (v * negCount + embedding[i] * weight) / newCount);
+      negCount = newCount;
+    }
+    processed++;
+  }
+
+  // Save progress
+  await supa(env, 'taste_profile?id=eq.1', {
+    method: 'PATCH',
+    body: JSON.stringify({
+      positive_centroid: posCentroid, negative_centroid: negCentroid,
+      positive_count: posCount, negative_count: negCount,
+      updated_at: new Date().toISOString()
+    })
+  });
+
+  const nextOffset = batchOffset + batchSize;
+  return json({
+    ok: true, done: swipes.length < batchSize,
+    processed, skipped, batch: swipes.length,
+    next_offset: nextOffset,
+    positive_count: posCount, negative_count: negCount
+  }, 200, request);
+
+  } catch (e) {
+    return json({ error: e.message, stack: e.stack }, 500, request);
+  }
 }
 
 // ── POST /fix-houses ─────────────────────────────────────
