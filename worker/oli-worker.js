@@ -38,6 +38,9 @@ export default {
       if (url.pathname === '/stats' && request.method === 'GET')
         return handleStats(request, env);
 
+      if (url.pathname === '/stats/accuracy-history' && request.method === 'GET')
+        return handleAccuracyHistory(request, env);
+
       if (url.pathname === '/fix-houses' && request.method === 'POST')
         return handleFixHouses(request, env);
 
@@ -376,6 +379,55 @@ async function handleStats(request, env) {
     active_listings: listingCount,
     accuracy
   }, 200, request);
+}
+
+// ── GET /stats/accuracy-history ──────────────────────────
+
+async function handleAccuracyHistory(request, env) {
+  try {
+    const scoredRes = await supa(env, 'swipes?predicted_score=not.is.null&select=action,predicted_score,created_at&order=created_at.asc&limit=1000');
+    const scored = await scoredRes.json();
+    if (!Array.isArray(scored) || scored.length < 10) {
+      return json({ points: [] }, 200, request);
+    }
+
+    const positive = ['right', 'favorite', 'super_like'];
+    const windowSize = 20;
+    const points = [];
+
+    for (let i = windowSize - 1; i < scored.length; i++) {
+      const window = scored.slice(i - windowSize + 1, i + 1);
+      let correct = 0;
+      window.forEach(s => {
+        const liked = positive.includes(s.action);
+        const predicted = s.predicted_score > 50;
+        if (liked === predicted) correct++;
+      });
+      points.push({
+        date: scored[i].created_at,
+        accuracy: Math.round((correct / windowSize) * 100),
+        index: i + 1
+      });
+    }
+
+    // Downsample to ~30 points max
+    if (points.length > 30) {
+      const step = Math.ceil(points.length / 30);
+      const downsampled = [];
+      for (let i = 0; i < points.length; i += step) {
+        downsampled.push(points[i]);
+      }
+      if (downsampled[downsampled.length - 1] !== points[points.length - 1]) {
+        downsampled.push(points[points.length - 1]);
+      }
+      return json({ points: downsampled }, 200, request);
+    }
+
+    return json({ points }, 200, request);
+  } catch (e) {
+    console.error('Accuracy history failed:', e);
+    return json({ points: [] }, 200, request);
+  }
 }
 
 // ── POST /rebuild-taste ──────────────────────────────────

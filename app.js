@@ -25,22 +25,27 @@
   let isDragging = false;
   let startX = 0, startY = 0, deltaX = 0, deltaY = 0;
   let isLoading = false;
+  let menuOpen = false;
 
   // ── DOM refs ────────────────────────────────────────────
   const scoutView = document.getElementById('scout-view');
   const investigateView = document.getElementById('investigate-view');
+  const artistsView = document.getElementById('artists-view');
   const settingsView = document.getElementById('settings-view');
   const cardStack = document.getElementById('card-stack');
   const emptyState = document.getElementById('empty-state');
   const favList = document.getElementById('fav-list');
   const favEmpty = document.getElementById('fav-empty');
   const artistList = document.getElementById('artist-list');
+  const artistEmpty = document.getElementById('artist-empty');
   const savedCount = document.getElementById('saved-count');
   const artistsCount = document.getElementById('artists-count');
   const tabbar = document.getElementById('tabbar');
-  const settingsBtn = document.getElementById('settings-btn');
+  const menuBtn = document.getElementById('menu-btn');
+  const menuDropdown = document.getElementById('menu-dropdown');
   const cfgCancel = document.getElementById('cfg-cancel');
   const settingsStats = document.getElementById('settings-stats');
+  const accuracyChartWrap = document.getElementById('accuracy-chart-wrap');
   const loadingEl = document.getElementById('loading');
   const favBtn = document.getElementById('fav-btn');
   const superBtn = document.getElementById('super-btn');
@@ -125,8 +130,7 @@
 
   async function recordSwipe(listingId, action) {
     swipedIds.add(listingId);
-    saveSwipedIds(); // persist to IndexedDB (fire and forget)
-    // Find predicted score for accuracy tracking
+    saveSwipedIds();
     const listing = feed.find(l => l.id === listingId);
     const predicted_score = listing?.similarity != null ? Math.round(listing.similarity * 100) : null;
     try {
@@ -187,6 +191,15 @@
     }
   }
 
+  async function fetchAccuracyHistory() {
+    try {
+      return await apiFetch('/stats/accuracy-history');
+    } catch (e) {
+      console.error('Accuracy history fetch failed:', e);
+      return { points: [] };
+    }
+  }
+
   // ── Card Rendering ──────────────────────────────────────
   function esc(s) {
     const d = document.createElement('div');
@@ -194,7 +207,6 @@
     return d.innerHTML;
   }
 
-  // Preload an image and return a promise
   function preloadImage(url) {
     return new Promise((resolve) => {
       if (!url) { resolve(false); return; }
@@ -222,7 +234,6 @@
     const maker = listing.maker || '';
     const ad = listing.auction_data || {};
 
-    // Auction urgency: time until close + bid activity
     let urgencyHtml = '';
     if (ad.lot_end_estimate || ad.sale_start) {
       const endDate = new Date(ad.lot_end_estimate || ad.sale_start);
@@ -236,10 +247,9 @@
       if (parts.length) urgencyHtml = `<span class="card-urgency${hoursLeft < 24 ? ' hot' : ''}">${esc(parts.join(' · '))}</span>`;
     }
 
-    // Estimate range
     let estimateHtml = '';
     if (ad.low_estimate && ad.high_estimate) {
-      estimateHtml = `<span class="card-estimate">Est $${Number(ad.low_estimate).toLocaleString()}–$${Number(ad.high_estimate).toLocaleString()}</span>`;
+      estimateHtml = `<span class="card-estimate">Est $${Number(ad.low_estimate).toLocaleString()}\u2013$${Number(ad.high_estimate).toLocaleString()}</span>`;
     }
 
     card.innerHTML = `
@@ -262,7 +272,6 @@
       </div>
     `;
 
-    // Load image in background, set once ready
     if (heroUrl) {
       preloadImage(heroUrl).then(ok => {
         if (ok) {
@@ -274,9 +283,8 @@
     return card;
   }
 
-  // Preload images ahead in the feed so they're ready when user swipes
   function preloadUpcoming() {
-    const start = feedIndex + 3; // beyond visible cards
+    const start = feedIndex + 3;
     const end = Math.min(start + 5, feed.length);
     for (let i = start; i < end; i++) {
       if (feed[i] && feed[i].hero_image) {
@@ -285,10 +293,8 @@
     }
   }
 
-  // Build the initial 3-card stack without destroying existing cards
   function renderCards() {
     cardStack.innerHTML = '';
-    // Skip listings with no hero_image
     while (feedIndex < feed.length && !feed[feedIndex].hero_image) feedIndex++;
 
     const remaining = feed.slice(feedIndex, feedIndex + 3).filter(l => l.hero_image);
@@ -303,9 +309,8 @@
     actionBtns.classList.remove('hidden');
 
     remaining.forEach((listing, i) => {
-      const zIndex = 5 - i; // first card on top
+      const zIndex = 5 - i;
       const card = createCard(listing, zIndex);
-      // Scale down cards behind
       if (i === 1) card.style.transform = 'scale(0.96) translateY(8px)';
       if (i === 2) card.style.transform = 'scale(0.92) translateY(16px)';
       cardStack.appendChild(card);
@@ -315,11 +320,9 @@
     preloadUpcoming();
   }
 
-  // After a swipe: just remove top card, promote others, add new card at back
   function advanceCard() {
     feedIndex++;
 
-    // Promote remaining cards
     const cards = cardStack.querySelectorAll('.card:not(.animating)');
     cards.forEach((card, i) => {
       card.style.zIndex = 5 - i;
@@ -332,7 +335,6 @@
       }
     });
 
-    // Add next card at back of stack if available
     const nextIdx = feedIndex + cards.length;
     if (nextIdx < feed.length) {
       const card = createCard(feed[nextIdx], 5 - cards.length);
@@ -340,16 +342,13 @@
       cardStack.appendChild(card);
     }
 
-    // Check if we're out of cards
     if (cards.length === 0) {
       emptyState.classList.remove('hidden');
       actionBtns.classList.add('hidden');
     }
 
-    // Preload upcoming images
     preloadUpcoming();
 
-    // Prefetch if running low
     if (feed.length - feedIndex <= PREFETCH_THRESHOLD) {
       loadMoreFeed();
     }
@@ -431,7 +430,6 @@
       animateOut(card, 'up');
       recordSwipe(listingId, 'left');
     } else {
-      // Snap back
       card.style.transition = 'transform 0.3s ease-out';
       card.style.transform = '';
       const likeOverlay = card.querySelector('.card-overlay.like');
@@ -444,7 +442,6 @@
   }
 
   function animateOut(card, direction) {
-    // Remove pointer handlers so they can't fire again
     card.removeEventListener('pointerdown', onPointerDown);
     card.removeEventListener('pointermove', onPointerMove);
     card.removeEventListener('pointerup', onPointerUp);
@@ -462,8 +459,8 @@
     card.style.opacity = '0';
 
     setTimeout(() => {
-      card.remove(); // just remove the swiped card from DOM
-      advanceCard(); // promote remaining cards, no rebuild
+      card.remove();
+      advanceCard();
     }, 350);
   }
 
@@ -522,6 +519,27 @@
     isLoading = false;
   }
 
+  // ── Hamburger Menu ────────────────────────────────────
+  function toggleMenu() {
+    menuOpen = !menuOpen;
+    menuDropdown.classList.toggle('hidden', !menuOpen);
+  }
+
+  function closeMenu() {
+    menuOpen = false;
+    menuDropdown.classList.add('hidden');
+  }
+
+  function handleMenuAction(action) {
+    closeMenu();
+    if (action === 'stats') {
+      switchTab('settings');
+    } else if (action === 'refresh') {
+      if (currentTab !== 'scout') switchTab('scout');
+      refreshFeed();
+    }
+  }
+
   // ── Investigate List ────────────────────────────────────
   function renderFavorites() {
     savedCount.textContent = favorites.length ? `(${favorites.length})` : '';
@@ -566,42 +584,155 @@
   }
 
   // ── Artist Targets List ────────────────────────────────
+
+  function getLinkLabel(url) {
+    try {
+      const host = new URL(url).hostname.replace('www.', '');
+      if (host.includes('artnet')) return 'Artnet';
+      if (host.includes('wikipedia')) return 'Wikipedia';
+      if (host.includes('instagram')) return 'Instagram';
+      if (host.includes('artsy')) return 'Artsy';
+      if (host.includes('gagosian') || host.includes('gallery') || host.includes('art')) return 'Gallery';
+      return host.split('.')[0].charAt(0).toUpperCase() + host.split('.')[0].slice(1);
+    } catch {
+      return 'Link';
+    }
+  }
+
   function renderArtists() {
     artistsCount.textContent = artists.length ? `(${artists.length})` : '';
 
     if (artists.length === 0) {
-      artistList.innerHTML = '<div style="padding:16px;color:var(--gray);font-size:13px;">No artist targets loaded.</div>';
+      artistList.innerHTML = '';
+      artistEmpty.classList.remove('hidden');
       return;
     }
 
-    artistList.innerHTML = artists.map(a => {
+    artistEmpty.classList.add('hidden');
+    artistList.innerHTML = artists.map((a, idx) => {
       const age = a.age ? `${a.age}` : '';
       const loc = a.location || '';
-      const meta = [age ? `Age ${age}` : '', loc].filter(Boolean).join(' · ');
+      const meta = [age ? `Age ${age}` : '', loc].filter(Boolean).join(' \u00B7 ');
       const repClass = a.rep_status || 'rep-none';
       const repLabel = a.rep_label || 'Unknown';
 
+      // Links
+      const links = (a.links || []).map(url =>
+        `<a href="${esc(url)}" target="_blank" rel="noopener" class="artist-link">${esc(getLinkLabel(url))}</a>`
+      ).join('');
+
+      // Notes
+      const notesHtml = a.notes ? `<div class="artist-notes">${esc(a.notes)}</div>` : '';
+
+      // Detail rows
+      const detailRows = [];
+      if (a.medium) detailRows.push(`<div class="artist-detail-row"><span class="artist-detail-label">Medium</span><span class="artist-detail-val">${esc(a.medium)}</span></div>`);
+      if (a.location) detailRows.push(`<div class="artist-detail-row"><span class="artist-detail-label">Location</span><span class="artist-detail-val">${esc(a.location)}</span></div>`);
+      if (a.birth_year) detailRows.push(`<div class="artist-detail-row"><span class="artist-detail-label">Born</span><span class="artist-detail-val">${a.birth_year}${age ? ` (age ${age})` : ''}</span></div>`);
+
       return `
-        <div class="artist-item">
+        <div class="artist-item" data-artist-idx="${idx}">
           <div class="artist-priority ${esc(a.priority || 'med')}"></div>
           <div class="artist-info">
             <div class="artist-name">${esc(a.name)}</div>
             <div class="artist-medium">${esc(a.medium || '')}</div>
-            <div class="artist-meta">${esc(meta)}</div>
             <span class="artist-rep ${esc(repClass)}">${esc(repLabel)}</span>
           </div>
-          <div class="artist-age">${esc(age)}</div>
+          <span class="artist-chevron">\u203A</span>
+        </div>
+        <div class="artist-detail hidden" data-detail-idx="${idx}">
+          ${detailRows.join('')}
+          ${links ? `<div class="artist-links">${links}</div>` : ''}
+          ${notesHtml}
         </div>
       `;
     }).join('');
+
+    // Attach expand/collapse handlers
+    artistList.querySelectorAll('.artist-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const idx = item.dataset.artistIdx;
+        const detail = artistList.querySelector(`.artist-detail[data-detail-idx="${idx}"]`);
+        const isExpanded = item.classList.contains('expanded');
+
+        // Collapse all others
+        artistList.querySelectorAll('.artist-item.expanded').forEach(other => {
+          other.classList.remove('expanded');
+          const otherDetail = artistList.querySelector(`.artist-detail[data-detail-idx="${other.dataset.artistIdx}"]`);
+          if (otherDetail) otherDetail.classList.add('hidden');
+        });
+
+        if (!isExpanded) {
+          item.classList.add('expanded');
+          detail.classList.remove('hidden');
+        }
+      });
+    });
+  }
+
+  // ── Accuracy Chart ─────────────────────────────────────
+  function renderAccuracyChart(points) {
+    if (!points || points.length === 0) {
+      accuracyChartWrap.innerHTML = `
+        <div class="accuracy-chart-wrap">
+          <div class="accuracy-chart-title">Prediction Accuracy Over Time</div>
+          <div class="accuracy-chart-empty">Need more scored swipes to show chart</div>
+        </div>
+      `;
+      return;
+    }
+
+    const W = 300, H = 100;
+    const padL = 28, padR = 8, padT = 8, padB = 16;
+    const chartW = W - padL - padR;
+    const chartH = H - padT - padB;
+
+    const minY = Math.max(0, Math.min(...points.map(p => p.accuracy)) - 10);
+    const maxY = Math.min(100, Math.max(...points.map(p => p.accuracy)) + 10);
+    const rangeY = maxY - minY || 1;
+
+    const coords = points.map((p, i) => {
+      const x = padL + (i / Math.max(1, points.length - 1)) * chartW;
+      const y = padT + chartH - ((p.accuracy - minY) / rangeY) * chartH;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+
+    // Grid lines at 25%, 50%, 75%
+    let gridLines = '';
+    for (const pct of [25, 50, 75]) {
+      if (pct >= minY && pct <= maxY) {
+        const y = padT + chartH - ((pct - minY) / rangeY) * chartH;
+        gridLines += `<line class="grid" x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}"/>`;
+        gridLines += `<text class="axis-label" x="${padL - 4}" y="${(y + 3).toFixed(1)}" text-anchor="end">${pct}%</text>`;
+      }
+    }
+
+    // 50% baseline
+    const baseline50 = padT + chartH - ((50 - minY) / rangeY) * chartH;
+
+    // Latest accuracy value
+    const latest = points[points.length - 1].accuracy;
+
+    accuracyChartWrap.innerHTML = `
+      <div class="accuracy-chart-wrap">
+        <div class="accuracy-chart-title">Prediction Accuracy Over Time <span style="float:right;color:var(--black);font-weight:700;">${latest}%</span></div>
+        <svg class="accuracy-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+          ${gridLines}
+          <line class="baseline" x1="${padL}" y1="${baseline50.toFixed(1)}" x2="${W - padR}" y2="${baseline50.toFixed(1)}"/>
+          <polyline class="line" points="${coords.join(' ')}"/>
+        </svg>
+      </div>
+    `;
   }
 
   // ── Navigation ──────────────────────────────────────────
   function switchTab(tab) {
     currentTab = tab;
+    closeMenu();
 
     scoutView.classList.add('hidden');
     investigateView.classList.add('hidden');
+    artistsView.classList.add('hidden');
     settingsView.classList.add('hidden');
 
     if (tab === 'scout') {
@@ -612,6 +743,9 @@
     } else if (tab === 'investigate') {
       investigateView.classList.remove('hidden');
       loadFavorites();
+    } else if (tab === 'artists') {
+      artistsView.classList.remove('hidden');
+      loadArtists();
     } else if (tab === 'settings') {
       settingsView.classList.remove('hidden');
       loadStats();
@@ -623,15 +757,17 @@
   }
 
   async function loadFavorites() {
-    const [favs, arts] = await Promise.all([fetchFavorites(), fetchArtists()]);
-    favorites = favs;
-    artists = arts;
+    favorites = await fetchFavorites();
     renderFavorites();
+  }
+
+  async function loadArtists() {
+    artists = await fetchArtists();
     renderArtists();
   }
 
   async function loadStats() {
-    const stats = await fetchStats();
+    const [stats, history] = await Promise.all([fetchStats(), fetchAccuracyHistory()]);
     if (!stats) {
       settingsStats.innerHTML = '<p>Could not load stats.</p>';
       return;
@@ -662,6 +798,8 @@
       <div class="stat-row"><span class="stat-label">Active listings</span><span class="stat-val">${stats.active_listings || 0}</span></div>
       ${accuracyHtml}
     `;
+
+    renderAccuracyChart(history.points);
   }
 
   // ── Init ────────────────────────────────────────────────
@@ -670,7 +808,6 @@
       navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
 
-    // Load persisted swiped IDs so we don't show dupes across sessions/devices
     await loadSwipedIds();
 
     // Tab bar navigation
@@ -679,8 +816,25 @@
       if (tab) switchTab(tab.dataset.tab);
     });
 
-    // Settings
-    settingsBtn.addEventListener('click', () => switchTab('settings'));
+    // Hamburger menu
+    menuBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleMenu();
+    });
+
+    menuDropdown.addEventListener('click', (e) => {
+      const item = e.target.closest('.menu-item');
+      if (item) handleMenuAction(item.dataset.action);
+    });
+
+    // Close menu on outside click
+    document.addEventListener('click', (e) => {
+      if (menuOpen && !e.target.closest('.menu-wrap')) {
+        closeMenu();
+      }
+    });
+
+    // Settings back button
     cfgCancel.addEventListener('click', () => switchTab('scout'));
 
     // Action buttons
@@ -688,7 +842,7 @@
     favBtn.addEventListener('click', handleFavButton);
     superBtn.addEventListener('click', handleSuperLike);
 
-    // Load initial feed with loading spinner
+    // Load initial feed
     isLoading = true;
     loadingEl.classList.remove('hidden');
 
