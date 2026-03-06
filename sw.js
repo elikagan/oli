@@ -1,4 +1,4 @@
-const CACHE = 'oli-v24';
+const CACHE = 'oli-v25';
 const SHELL = [
   './',
   './style.css',

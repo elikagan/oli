@@ -922,7 +922,6 @@ async function handleGetArtists(request, env) {
   // Second pass: for artists without a maker match, search listing titles
   const missing = names.filter(n => !thumbMap[n]);
   if (missing.length > 0) {
-    // Search titles for each missing artist (up to 15 to stay under subrequest limit)
     const toSearch = missing.slice(0, 15);
     const titleSearches = await Promise.all(toSearch.map(async (name) => {
       try {
@@ -936,6 +935,44 @@ async function handleGetArtists(request, env) {
       return null;
     }));
     titleSearches.forEach(r => { if (r) thumbMap[r.name] = r.image; });
+  }
+
+  // Third pass: Wikipedia API for artists still without images (single batch request)
+  const stillMissing = names.filter(n => !thumbMap[n]);
+  if (stillMissing.length > 0) {
+    try {
+      // Wikipedia supports multiple titles pipe-separated in one request
+      const wikiTitles = stillMissing.map(n => encodeURIComponent(n.replace(/ /g, '_'))).join('|');
+      const wikiRes = await fetch(
+        `https://en.wikipedia.org/w/api.php?action=query&titles=${wikiTitles}&prop=pageimages&format=json&pithumbsize=600&pilicense=any`,
+        { headers: { 'User-Agent': 'OLI-App/1.0' } }
+      );
+      const wikiData = await wikiRes.json();
+      if (wikiData?.query?.pages) {
+        // Build a map of normalized title → original name for matching
+        const normalizedMap = {};
+        stillMissing.forEach(n => { normalizedMap[n.replace(/ /g, '_').toLowerCase()] = n; });
+        // Also use Wikipedia's normalization data
+        const wikiNorm = {};
+        if (wikiData.query.normalized) {
+          wikiData.query.normalized.forEach(n => { wikiNorm[n.to] = n.from; });
+        }
+
+        for (const page of Object.values(wikiData.query.pages)) {
+          if (page.thumbnail?.source) {
+            // Match back to our artist name
+            const pageTitle = page.title;
+            const fromTitle = wikiNorm[pageTitle] || pageTitle;
+            const key = fromTitle.replace(/_/g, ' ');
+            // Try exact match first, then case-insensitive
+            const match = stillMissing.find(n => n === key || n.toLowerCase() === key.toLowerCase());
+            if (match) thumbMap[match] = page.thumbnail.source;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Wikipedia thumbnail fetch failed:', e);
+    }
   }
 
   artists.forEach(a => { a.thumbnail = thumbMap[a.name] || null; });
