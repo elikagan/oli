@@ -26,6 +26,9 @@
   let startX = 0, startY = 0, deltaX = 0, deltaY = 0;
   let isLoading = false;
   let menuOpen = false;
+  let artistMode = 'list'; // 'list' or 'triage'
+  let triageQueue = [];
+  let triageIndex = 0;
 
   // ── DOM refs ────────────────────────────────────────────
   const scoutView = document.getElementById('scout-view');
@@ -51,6 +54,17 @@
   const superBtn = document.getElementById('super-btn');
   const hateBtn = document.getElementById('hate-btn');
   const actionBtns = document.getElementById('action-btns');
+  // Artist triage
+  const artistListWrap = document.getElementById('artist-list-wrap');
+  const artistTriage = document.getElementById('artist-triage');
+  const artistCardStack = document.getElementById('artist-card-stack');
+  const artistTriageEmpty = document.getElementById('artist-triage-empty');
+  const artistActionBtns = document.getElementById('artist-action-btns');
+  const artistModeList = document.getElementById('artist-mode-list');
+  const artistModeTriage = document.getElementById('artist-mode-triage');
+  const artistDeleteBtn = document.getElementById('artist-delete-btn');
+  const artistArchiveBtn = document.getElementById('artist-archive-btn');
+  const artistSaveBtn = document.getElementById('artist-save-btn');
 
   // ── IndexedDB ───────────────────────────────────────────
   function openDB() {
@@ -708,21 +722,24 @@
   }
 
   function renderArtists() {
-    artistsCount.textContent = artists.length ? `(${artists.length})` : '';
+    // Filter out archived artists from list view
+    const visible = artists.filter(a => a.priority !== 'archived');
+    artistsCount.textContent = visible.length ? `(${visible.length})` : '';
 
-    if (artists.length === 0) {
+    if (visible.length === 0) {
       artistList.innerHTML = '';
       artistEmpty.classList.remove('hidden');
       return;
     }
 
     artistEmpty.classList.add('hidden');
-    artistList.innerHTML = artists.map((a, idx) => {
+    artistList.innerHTML = visible.map((a, idx) => {
       const age = a.age ? `${a.age}` : '';
       const loc = a.location || '';
       const meta = [age ? `Age ${age}` : '', loc].filter(Boolean).join(' \u00B7 ');
       const repClass = a.rep_status || 'rep-none';
       const repLabel = a.rep_label || 'Unknown';
+      const isNew = a.source === 'auto_swipe' && a.priority === 'med';
 
       // Links
       const links = (a.links || []).map(url =>
@@ -742,7 +759,7 @@
         <div class="artist-item" data-artist-idx="${idx}">
           ${a.thumbnail ? `<div class="artist-thumb" style="background-image:url('${esc(a.thumbnail)}')"></div>` : `<div class="artist-thumb artist-thumb-empty">${esc(a.name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase())}</div>`}
           <div class="artist-info">
-            <div class="artist-name">${esc(a.name)}</div>
+            <div class="artist-name">${esc(a.name)}${isNew ? '<span class="artist-new-label">New</span>' : ''}</div>
             <div class="artist-medium">${esc(a.medium || '')}</div>
             <span class="artist-rep ${esc(repClass)}">${esc(repLabel)}</span>
           </div>
@@ -776,6 +793,163 @@
         }
       });
     });
+  }
+
+  // ── Artist Triage ──────────────────────────────────────
+
+  function getNewArtists() {
+    return artists.filter(a => a.source === 'auto_swipe' && a.priority === 'med');
+  }
+
+  function updateArtistBadge() {
+    const newCount = getNewArtists().length;
+    const artistTab = tabbar.querySelector('[data-tab="artists"]');
+    let badge = artistTab.querySelector('.tab-badge');
+    if (newCount > 0) {
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'tab-badge';
+        artistTab.appendChild(badge);
+      }
+      badge.textContent = newCount;
+    } else if (badge) {
+      badge.remove();
+    }
+  }
+
+  function switchArtistMode(mode) {
+    artistMode = mode;
+    artistModeList.classList.toggle('active', mode === 'list');
+    artistModeTriage.classList.toggle('active', mode === 'triage');
+
+    if (mode === 'list') {
+      artistListWrap.classList.remove('hidden');
+      artistTriage.classList.add('hidden');
+      artistActionBtns.classList.add('hidden');
+    } else {
+      artistListWrap.classList.add('hidden');
+      artistTriage.classList.remove('hidden');
+      initTriage();
+    }
+  }
+
+  function initTriage() {
+    // Show all non-archived artists in triage, new ones first
+    triageQueue = artists
+      .filter(a => a.priority !== 'archived')
+      .sort((a, b) => {
+        const aNew = a.source === 'auto_swipe' && a.priority === 'med' ? 0 : 1;
+        const bNew = b.source === 'auto_swipe' && b.priority === 'med' ? 0 : 1;
+        return aNew - bNew;
+      });
+    triageIndex = 0;
+    renderTriageCards();
+  }
+
+  function renderTriageCards() {
+    artistCardStack.innerHTML = '';
+
+    if (triageIndex >= triageQueue.length) {
+      artistTriageEmpty.classList.remove('hidden');
+      artistActionBtns.classList.add('hidden');
+      return;
+    }
+
+    artistTriageEmpty.classList.add('hidden');
+    artistActionBtns.classList.remove('hidden');
+
+    // Show up to 2 cards (current + next for stacking)
+    const count = Math.min(2, triageQueue.length - triageIndex);
+    for (let i = count - 1; i >= 0; i--) {
+      const a = triageQueue[triageIndex + i];
+      const isNew = a.source === 'auto_swipe' && a.priority === 'med';
+      const initials = a.name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+      const meta = [
+        a.age ? `Age ${a.age}` : '',
+        a.location || ''
+      ].filter(Boolean);
+      const repClass = a.rep_status || 'rep-none';
+      const repLabel = a.rep_label || 'Unknown';
+
+      const card = document.createElement('div');
+      card.className = 'artist-card';
+      card.style.zIndex = 10 - i;
+      if (i > 0) card.style.transform = 'scale(0.95) translateY(8px)';
+
+      card.innerHTML = `
+        ${a.thumbnail
+          ? `<div class="artist-card-image" style="background-image:url('${esc(a.thumbnail)}')">
+               ${isNew ? '<span class="artist-card-new-badge">New</span>' : ''}
+             </div>`
+          : `<div class="artist-card-image artist-card-image-empty">
+               ${isNew ? '<span class="artist-card-new-badge">New</span>' : ''}
+               ${initials}
+             </div>`
+        }
+        <div class="artist-card-body">
+          <div class="artist-card-name">${esc(a.name)}</div>
+          ${a.medium ? `<div class="artist-card-medium">${esc(a.medium)}</div>` : ''}
+          <div class="artist-card-meta">
+            <span class="artist-rep ${esc(repClass)}">${esc(repLabel)}</span>
+            ${meta.map(m => `<span class="artist-card-tag">${esc(m)}</span>`).join('')}
+          </div>
+          ${a.notes ? `<div class="artist-card-notes">${esc(a.notes)}</div>` : ''}
+        </div>
+      `;
+      artistCardStack.appendChild(card);
+    }
+  }
+
+  async function triageAction(action) {
+    if (triageIndex >= triageQueue.length) return;
+    const a = triageQueue[triageIndex];
+    const topCard = artistCardStack.querySelector('.artist-card');
+    if (!topCard) return;
+
+    // Animate out
+    topCard.classList.add('animating');
+    if (action === 'save') {
+      topCard.style.transform = 'translateX(120%) rotate(15deg)';
+      topCard.style.opacity = '0';
+    } else if (action === 'archive') {
+      topCard.style.transform = 'translateY(-100%) scale(0.8)';
+      topCard.style.opacity = '0';
+    } else {
+      topCard.style.transform = 'translateX(-120%) rotate(-15deg)';
+      topCard.style.opacity = '0';
+    }
+
+    // API call
+    try {
+      if (action === 'delete') {
+        await apiFetch(`/artists?name=${encodeURIComponent(a.name)}`, { method: 'DELETE' });
+        artists = artists.filter(ar => ar.name !== a.name);
+      } else if (action === 'save') {
+        await apiFetch('/artists', {
+          method: 'PATCH',
+          body: JSON.stringify({ name: a.name, priority: 'high' })
+        });
+        const found = artists.find(ar => ar.name === a.name);
+        if (found) found.priority = 'high';
+      } else if (action === 'archive') {
+        await apiFetch('/artists', {
+          method: 'PATCH',
+          body: JSON.stringify({ name: a.name, priority: 'archived' })
+        });
+        const found = artists.find(ar => ar.name === a.name);
+        if (found) found.priority = 'archived';
+      }
+    } catch (e) {
+      console.error('Triage action failed:', e);
+    }
+
+    updateArtistBadge();
+
+    // Advance after animation
+    setTimeout(() => {
+      triageIndex++;
+      renderTriageCards();
+    }, 350);
   }
 
   // ── Accuracy Chart ─────────────────────────────────────
@@ -862,6 +1036,7 @@
     artistsView.classList.add('hidden');
     settingsView.classList.add('hidden');
     actionBtns.classList.add('hidden');
+    artistActionBtns.classList.add('hidden');
 
     if (tab === 'scout') {
       scoutView.classList.remove('hidden');
@@ -873,7 +1048,9 @@
       loadFavorites();
     } else if (tab === 'artists') {
       artistsView.classList.remove('hidden');
-      loadArtists();
+      loadArtists().then(() => {
+        if (artistMode === 'triage') initTriage();
+      });
     } else if (tab === 'settings') {
       settingsView.classList.remove('hidden');
       loadStats();
@@ -892,6 +1069,7 @@
   async function loadArtists() {
     artists = await fetchArtists();
     renderArtists();
+    updateArtistBadge();
   }
 
   async function loadStats() {
@@ -970,8 +1148,20 @@
       favBtn.addEventListener('click', handleFavButton);
       superBtn.addEventListener('click', handleSuperLike);
 
+      // Artist mode toggle
+      artistModeList.addEventListener('click', () => switchArtistMode('list'));
+      artistModeTriage.addEventListener('click', () => switchArtistMode('triage'));
+
+      // Artist triage buttons
+      artistDeleteBtn.addEventListener('click', () => triageAction('delete'));
+      artistArchiveBtn.addEventListener('click', () => triageAction('archive'));
+      artistSaveBtn.addEventListener('click', () => triageAction('save'));
+
       // Pull to refresh
       initPullToRefresh();
+
+      // Load artists in background for badge count
+      fetchArtists().then(a => { artists = a; updateArtistBadge(); }).catch(() => {});
 
       // Load initial feed
       loadingEl.classList.remove('hidden');

@@ -68,6 +68,9 @@ export default {
       if (url.pathname === '/artists' && request.method === 'POST')
         return handleImportArtists(request, env);
 
+      if (url.pathname === '/artists' && request.method === 'PATCH')
+        return handlePatchArtist(request, env);
+
       if (url.pathname === '/artists' && request.method === 'DELETE')
         return handleDeleteArtist(request, env, url);
 
@@ -980,6 +983,23 @@ async function handleDeleteArtist(request, env, url) {
   });
   const result = await res.json();
   return json({ ok: true, deleted: Array.isArray(result) ? result.length : 0 }, 200, request);
+}
+
+// ── PATCH /artists ─────────────────────────────────────
+// Body: { name: "Artist Name", priority: "high"|"med"|"low"|"archived" }
+
+async function handlePatchArtist(request, env) {
+  const { name, priority } = await request.json();
+  if (!name) return json({ error: 'name required' }, 400, request);
+  const updates = {};
+  if (priority) updates.priority = priority;
+  const res = await supa(env, `artists?name=eq.${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(updates),
+    headers: { 'Prefer': 'return=representation' }
+  });
+  const result = await res.json();
+  return json({ ok: true, updated: Array.isArray(result) ? result.length : 0 }, 200, request);
 }
 
 // ── POST /fix-houses ─────────────────────────────────────

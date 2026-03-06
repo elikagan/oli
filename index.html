@@ -71,13 +71,39 @@
 
   <!-- Artists Screen -->
   <section id="artists-view" class="view hidden">
-    <div class="section-header">Artist Targets <span id="artists-count" class="section-count"></span></div>
-    <div id="artist-list" class="fav-list">
-      <!-- Artists injected by JS -->
+    <div class="section-header">
+      <span>Artist Targets <span id="artists-count" class="section-count"></span></span>
+      <div class="artist-mode-toggle">
+        <button id="artist-mode-list" class="mode-btn active">List</button>
+        <button id="artist-mode-triage" class="mode-btn">Triage</button>
+      </div>
     </div>
-    <div id="artist-empty" class="empty-state" style="height:auto;padding:32px 24px;">
-      <p>No artist targets loaded.</p>
-      <p class="empty-sub">Import artists via the API.</p>
+
+    <!-- List mode -->
+    <div id="artist-list-wrap">
+      <div id="artist-list" class="fav-list">
+        <!-- Artists injected by JS -->
+      </div>
+      <div id="artist-empty" class="empty-state" style="height:auto;padding:32px 24px;">
+        <p>No artist targets loaded.</p>
+        <p class="empty-sub">Import artists via the API.</p>
+      </div>
+    </div>
+
+    <!-- Triage mode -->
+    <div id="artist-triage" class="hidden">
+      <div id="artist-card-stack" class="artist-card-stack">
+        <!-- Artist cards injected by JS -->
+      </div>
+      <div id="artist-triage-empty" class="empty-state hidden" style="height:auto;padding:60px 24px;">
+        <p>All caught up!</p>
+        <p class="empty-sub">No new artists to review.</p>
+      </div>
+    </div>
+    <div id="artist-action-btns" class="artist-action-btns hidden">
+      <button id="artist-delete-btn" class="artist-action-btn artist-delete-btn" aria-label="Delete">&#128465;</button>
+      <button id="artist-archive-btn" class="artist-action-btn artist-archive-btn" aria-label="Archive">&#128230;</button>
+      <button id="artist-save-btn" class="artist-action-btn artist-save-btn" aria-label="Save">&#9733;</button>
     </div>
   </section>
 
