@@ -740,7 +740,7 @@
 
       return `
         <div class="artist-item" data-artist-idx="${idx}">
-          ${a.thumbnail ? `<div class="artist-thumb" style="background-image:url('${esc(a.thumbnail)}')"></div>` : `<div class="artist-thumb artist-thumb-empty"></div>`}
+          ${a.thumbnail ? `<div class="artist-thumb" style="background-image:url('${esc(a.thumbnail)}')"></div>` : `<div class="artist-thumb artist-thumb-empty">${esc(a.name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase())}</div>`}
           <div class="artist-info">
             <div class="artist-name">${esc(a.name)}</div>
             <div class="artist-medium">${esc(a.medium || '')}</div>

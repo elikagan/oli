@@ -904,7 +904,7 @@ async function handleGetArtists(request, env) {
     return json({ artists: [] }, 200, request);
   }
 
-  // Fetch thumbnails: for each artist, find a liked listing by that maker
+  // Fetch thumbnails: for each artist, find a listing by that maker
   const names = artists.map(a => a.name);
   const thumbRes = await fetch(
     `${env.SUPABASE_URL}/rest/v1/listings?maker=in.(${names.map(n => encodeURIComponent('"' + n.replace(/"/g, '\\"') + '"')).join(',')})&hero_image=not.is.null&select=maker,hero_image&limit=500`,
@@ -914,6 +914,25 @@ async function handleGetArtists(request, env) {
   const thumbMap = {};
   if (Array.isArray(thumbRows)) {
     thumbRows.forEach(r => { if (!thumbMap[r.maker]) thumbMap[r.maker] = r.hero_image; });
+  }
+
+  // Second pass: for artists without a maker match, search listing titles
+  const missing = names.filter(n => !thumbMap[n]);
+  if (missing.length > 0) {
+    // Search titles for each missing artist (up to 15 to stay under subrequest limit)
+    const toSearch = missing.slice(0, 15);
+    const titleSearches = await Promise.all(toSearch.map(async (name) => {
+      try {
+        const r = await fetch(
+          `${env.SUPABASE_URL}/rest/v1/listings?title=ilike.*${encodeURIComponent(name)}*&hero_image=not.is.null&select=title,hero_image&limit=1`,
+          { headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}` } }
+        );
+        const rows = await r.json();
+        if (Array.isArray(rows) && rows.length > 0) return { name, image: rows[0].hero_image };
+      } catch {}
+      return null;
+    }));
+    titleSearches.forEach(r => { if (r) thumbMap[r.name] = r.image; });
   }
 
   artists.forEach(a => { a.thumbnail = thumbMap[a.name] || null; });

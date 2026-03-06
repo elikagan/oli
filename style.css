@@ -538,9 +538,9 @@ body {
 }
 
 .artist-thumb {
-  width: 48px;
-  height: 48px;
-  border-radius: 6px;
+  width: 96px;
+  height: 96px;
+  border-radius: 8px;
   flex-shrink: 0;
   background-size: cover;
   background-position: center;
@@ -549,6 +549,13 @@ body {
 
 .artist-thumb-empty {
   background: var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 1px;
 }
 
 .artist-info {
