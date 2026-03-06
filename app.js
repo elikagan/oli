@@ -755,17 +755,29 @@
       if (a.location) detailRows.push(`<div class="artist-detail-row"><span class="artist-detail-label">Location</span><span class="artist-detail-val">${esc(a.location)}</span></div>`);
       if (a.birth_year) detailRows.push(`<div class="artist-detail-row"><span class="artist-detail-label">Born</span><span class="artist-detail-val">${a.birth_year}${age ? ` (age ${age})` : ''}</span></div>`);
 
+      // Source listing (the piece they swiped on)
+      const sl = a.source_listing;
+      const sourceHtml = sl ? `<div class="artist-source${sl.swiped ? ' swiped' : ''}">
+        <span class="artist-source-label">${sl.swiped ? 'You swiped on' : 'In inventory'}</span>
+        <a href="${esc(sl.url)}" target="_blank" rel="noopener" class="artist-source-link">
+          <img src="${esc(sl.hero_image)}" class="artist-source-img" alt="">
+          <span class="artist-source-title">${esc(sl.title)}${sl.price ? ` · $${Number(sl.price).toLocaleString()}` : ''}</span>
+        </a>
+      </div>` : '';
+
       return `
         <div class="artist-item" data-artist-idx="${idx}">
           ${a.thumbnail ? `<div class="artist-thumb" style="background-image:url('${esc(a.thumbnail)}')"></div>` : `<div class="artist-thumb artist-thumb-empty">${esc(a.name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase())}</div>`}
           <div class="artist-info">
             <div class="artist-name">${esc(a.name)}${isNew ? '<span class="artist-new-label">New</span>' : ''}</div>
+            ${sl && sl.swiped ? '<div class="artist-swiped-badge">From your swipes</div>' : ''}
             <div class="artist-medium">${esc(a.medium || '')}</div>
             <span class="artist-rep ${esc(repClass)}">${esc(repLabel)}</span>
           </div>
           <span class="artist-chevron">\u203A</span>
         </div>
         <div class="artist-detail hidden" data-detail-idx="${idx}">
+          ${sourceHtml}
           ${detailRows.join('')}
           ${links ? `<div class="artist-links">${links}</div>` : ''}
           ${notesHtml}
@@ -876,6 +888,17 @@
       card.style.zIndex = 10 - i;
       if (i > 0) card.style.transform = 'scale(0.95) translateY(8px)';
 
+      const sl = a.source_listing;
+      const sourceCardHtml = sl ? `<div class="artist-card-source${sl.swiped ? ' swiped' : ''}">
+        <a href="${esc(sl.url)}" target="_blank" rel="noopener" class="artist-source-link">
+          <img src="${esc(sl.hero_image)}" class="artist-source-img" alt="">
+          <div>
+            <div class="artist-source-label">${sl.swiped ? 'You swiped on this' : 'In inventory'}</div>
+            <div class="artist-source-title">${esc(sl.title)}${sl.price ? ` · $${Number(sl.price).toLocaleString()}` : ''}</div>
+          </div>
+        </a>
+      </div>` : '';
+
       card.innerHTML = `
         ${a.thumbnail
           ? `<div class="artist-card-image" style="background-image:url('${esc(a.thumbnail)}')">
@@ -893,6 +916,7 @@
             <span class="artist-rep ${esc(repClass)}">${esc(repLabel)}</span>
             ${meta.map(m => `<span class="artist-card-tag">${esc(m)}</span>`).join('')}
           </div>
+          ${sourceCardHtml}
           ${a.notes ? `<div class="artist-card-notes">${esc(a.notes)}</div>` : ''}
         </div>
       `;

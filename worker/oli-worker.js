@@ -907,16 +907,43 @@ async function handleGetArtists(request, env) {
     return json({ artists: [] }, 200, request);
   }
 
-  // Fetch thumbnails: for each artist, find a listing by that maker
+  // Fetch listings by maker — images, URLs, titles for linking back to swiped pieces
   const names = artists.map(a => a.name);
   const thumbRes = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/listings?maker=in.(${names.map(n => encodeURIComponent('"' + n.replace(/"/g, '\\"') + '"')).join(',')})&hero_image=not.is.null&select=maker,hero_image&limit=500`,
+    `${env.SUPABASE_URL}/rest/v1/listings?maker=in.(${names.map(n => encodeURIComponent('"' + n.replace(/"/g, '\\"') + '"')).join(',')})&hero_image=not.is.null&select=id,maker,hero_image,title,url,price&limit=500`,
     { headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}` } }
   );
   const thumbRows = await thumbRes.json();
+
+  // Fetch swiped listing IDs to identify which pieces the user actually swiped on
+  const swipeRes = await fetch(`${env.SUPABASE_URL}/rest/v1/swipes?action=in.(right,favorite,super_like)&select=listing_id`, {
+    headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`, 'Range': '0-9999' }
+  });
+  const swipeRows = await swipeRes.json();
+  const swipedSet = new Set(Array.isArray(swipeRows) ? swipeRows.map(s => String(s.listing_id)) : []);
+
   const thumbMap = {};
+  const sourceListingMap = {}; // artist name → { title, url, hero_image, price, swiped }
   if (Array.isArray(thumbRows)) {
-    thumbRows.forEach(r => { if (!thumbMap[r.maker]) thumbMap[r.maker] = r.hero_image; });
+    // Group listings by maker
+    const byMaker = {};
+    thumbRows.forEach(r => {
+      if (!byMaker[r.maker]) byMaker[r.maker] = [];
+      byMaker[r.maker].push(r);
+    });
+    // For each artist, prefer a swiped listing, else use the first one
+    for (const [maker, listings] of Object.entries(byMaker)) {
+      const swiped = listings.find(l => swipedSet.has(String(l.id)));
+      const pick = swiped || listings[0];
+      thumbMap[maker] = pick.hero_image;
+      sourceListingMap[maker] = {
+        title: pick.title,
+        url: pick.url,
+        hero_image: pick.hero_image,
+        price: pick.price,
+        swiped: !!swiped
+      };
+    }
   }
 
   // Second pass: for artists without a maker match, search listing titles
@@ -937,45 +964,34 @@ async function handleGetArtists(request, env) {
     titleSearches.forEach(r => { if (r) thumbMap[r.name] = r.image; });
   }
 
-  // Third pass: Wikipedia API for artists still without images (single batch request)
+  // Third pass: Art Institute of Chicago API — actual artwork images
   const stillMissing = names.filter(n => !thumbMap[n]);
   if (stillMissing.length > 0) {
-    try {
-      // Wikipedia supports multiple titles pipe-separated in one request
-      const wikiTitles = stillMissing.map(n => encodeURIComponent(n.replace(/ /g, '_'))).join('|');
-      const wikiRes = await fetch(
-        `https://en.wikipedia.org/w/api.php?action=query&titles=${wikiTitles}&prop=pageimages&format=json&pithumbsize=600&pilicense=any`,
-        { headers: { 'User-Agent': 'OLI-App/1.0' } }
-      );
-      const wikiData = await wikiRes.json();
-      if (wikiData?.query?.pages) {
-        // Build a map of normalized title → original name for matching
-        const normalizedMap = {};
-        stillMissing.forEach(n => { normalizedMap[n.replace(/ /g, '_').toLowerCase()] = n; });
-        // Also use Wikipedia's normalization data
-        const wikiNorm = {};
-        if (wikiData.query.normalized) {
-          wikiData.query.normalized.forEach(n => { wikiNorm[n.to] = n.from; });
-        }
-
-        for (const page of Object.values(wikiData.query.pages)) {
-          if (page.thumbnail?.source) {
-            // Match back to our artist name
-            const pageTitle = page.title;
-            const fromTitle = wikiNorm[pageTitle] || pageTitle;
-            const key = fromTitle.replace(/_/g, ' ');
-            // Try exact match first, then case-insensitive
-            const match = stillMissing.find(n => n === key || n.toLowerCase() === key.toLowerCase());
-            if (match) thumbMap[match] = page.thumbnail.source;
+    const artworkSearches = await Promise.all(stillMissing.slice(0, 20).map(async (name) => {
+      try {
+        const r = await fetch(
+          `https://api.artic.edu/api/v1/artworks/search?q=${encodeURIComponent(name)}&fields=image_id,artist_title&limit=5`
+        );
+        const data = await r.json();
+        if (data?.data) {
+          // Find first result with an image that matches the artist
+          const match = data.data.find(d => d.image_id && d.artist_title?.toLowerCase().includes(name.split(' ').pop().toLowerCase()));
+          const fallback = data.data.find(d => d.image_id);
+          const pick = match || fallback;
+          if (pick?.image_id) {
+            return { name, image: `https://www.artic.edu/iiif/2/${pick.image_id}/full/600,/0/default.jpg` };
           }
         }
-      }
-    } catch (e) {
-      console.error('Wikipedia thumbnail fetch failed:', e);
-    }
+      } catch {}
+      return null;
+    }));
+    artworkSearches.forEach(r => { if (r) thumbMap[r.name] = r.image; });
   }
 
-  artists.forEach(a => { a.thumbnail = thumbMap[a.name] || null; });
+  artists.forEach(a => {
+    a.thumbnail = thumbMap[a.name] || null;
+    a.source_listing = sourceListingMap[a.name] || null;
+  });
   return json({ artists }, 200, request);
 }
 
