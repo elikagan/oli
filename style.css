@@ -528,7 +528,7 @@ body {
   gap: 12px;
   padding: 12px 0;
   border-bottom: 1px solid var(--border);
-  align-items: flex-start;
+  align-items: center;
   cursor: pointer;
   transition: background 0.1s;
 }
@@ -537,15 +537,19 @@ body {
   background: var(--bg);
 }
 
-.artist-priority {
-  width: 4px;
-  border-radius: 2px;
+.artist-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
   flex-shrink: 0;
-  align-self: stretch;
+  background-size: cover;
+  background-position: center;
+  background-color: var(--bg);
 }
 
-.artist-priority.high { background: #22c55e; }
-.artist-priority.med { background: #f59e0b; }
+.artist-thumb-empty {
+  background: var(--border);
+}
 
 .artist-info {
   flex: 1;

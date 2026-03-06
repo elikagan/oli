@@ -400,10 +400,29 @@ async function handleSwipe(request, env) {
   });
 
   // Update taste profile if listing has embedding
-  const listingRes = await supa(env, `listings?id=eq.${listing_id}&select=embedding`);
+  const listingRes = await supa(env, `listings?id=eq.${listing_id}&select=embedding,maker,hero_image,title`);
   const listings = await listingRes.json();
-  if (listings[0]?.embedding) {
-    await updateTasteProfile(env, listings[0].embedding, action);
+  const listing = listings[0];
+  if (listing?.embedding) {
+    await updateTasteProfile(env, listing.embedding, action);
+  }
+
+  // Auto-add artist on positive swipe if listing has a maker
+  const positive = ['right', 'favorite', 'super_like'];
+  if (positive.includes(action) && listing?.maker) {
+    try {
+      await supa(env, 'artists?on_conflict=name', {
+        method: 'POST',
+        body: JSON.stringify([{
+          name: listing.maker,
+          source: 'auto_swipe',
+          priority: 'med'
+        }]),
+        headers: { 'Prefer': 'return=minimal,resolution=ignore-duplicates' }
+      });
+    } catch (e) {
+      console.error('Auto-add artist failed:', e);
+    }
   }
 
   return json({ ok: true }, 200, request);
@@ -856,7 +875,24 @@ CREATE INDEX IF NOT EXISTS idx_listings_embedding_hnsw
 async function handleGetArtists(request, env) {
   const res = await supa(env, 'artists?select=*&order=priority.asc,name.asc');
   const artists = await res.json();
-  return json({ artists: artists || [] }, 200, request);
+  if (!Array.isArray(artists) || artists.length === 0) {
+    return json({ artists: [] }, 200, request);
+  }
+
+  // Fetch thumbnails: for each artist, find a liked listing by that maker
+  const names = artists.map(a => a.name);
+  const thumbRes = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/listings?maker=in.(${names.map(n => encodeURIComponent('"' + n.replace(/"/g, '\\"') + '"')).join(',')})&hero_image=not.is.null&select=maker,hero_image&limit=500`,
+    { headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}` } }
+  );
+  const thumbRows = await thumbRes.json();
+  const thumbMap = {};
+  if (Array.isArray(thumbRows)) {
+    thumbRows.forEach(r => { if (!thumbMap[r.maker]) thumbMap[r.maker] = r.hero_image; });
+  }
+
+  artists.forEach(a => { a.thumbnail = thumbMap[a.name] || null; });
+  return json({ artists }, 200, request);
 }
 
 // ── POST /artists ────────────────────────────────────────

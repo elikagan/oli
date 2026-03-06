@@ -450,6 +450,12 @@
       if (likeOverlay) likeOverlay.style.opacity = 0;
       if (skipOverlay) skipOverlay.style.opacity = 0;
       if (favOverlay) favOverlay.style.opacity = 0;
+
+      // Tap (minimal movement) → open listing URL
+      if (Math.abs(deltaX) < 5 && Math.abs(deltaY) < 5) {
+        const listing = feed.find(l => l.id === listingId);
+        if (listing?.url) window.open(listing.url, '_blank');
+      }
     }
   }
 
@@ -725,7 +731,7 @@
 
       return `
         <div class="artist-item" data-artist-idx="${idx}">
-          <div class="artist-priority ${esc(a.priority || 'med')}"></div>
+          ${a.thumbnail ? `<div class="artist-thumb" style="background-image:url('${esc(a.thumbnail)}')"></div>` : `<div class="artist-thumb artist-thumb-empty"></div>`}
           <div class="artist-info">
             <div class="artist-name">${esc(a.name)}</div>
             <div class="artist-medium">${esc(a.medium || '')}</div>
