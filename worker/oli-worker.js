@@ -47,6 +47,9 @@ export default {
       if (url.pathname === '/admin/cleanup-nk' && request.method === 'POST')
         return handleCleanupNK(request, env);
 
+      if (url.pathname === '/admin/process' && request.method === 'POST')
+        return handleProcessBatch(request, env);
+
       if (url.pathname === '/fix-houses' && request.method === 'POST')
         return handleFixHouses(request, env);
 
@@ -333,6 +336,15 @@ async function handleSwipeDupes(request, url, env) {
     })),
     recent_5: recent
   }, 200, request);
+}
+
+async function handleProcessBatch(request, env) {
+  try {
+    const result = await processUnembeddedListings(env, 10);
+    return json(result, 200, request);
+  } catch (e) {
+    return json({ error: e.message }, 500, request);
+  }
 }
 
 async function handleCleanupNK(request, env) {
@@ -1529,11 +1541,11 @@ async function scrapeCraigslistSearch(env, search) {
 
 // ── AI Processing ─────────────────────────────────────────
 
-async function processUnembeddedListings(env) {
-  // Process only 5 per call to stay within 50 subrequest limit
-  // (each listing: 1 image fetch + 1 Gemini + 1 embedding + 1 Supabase write = 4 subrequests)
+async function processUnembeddedListings(env, batchSize = 10) {
+  // Each listing: 1 image fetch + 1 Gemini + 1 embedding + 1 Supabase write = 4 subrequests
+  // Worker limit: 50 subrequests. With batchSize=10, that's 40 + a few overhead = safe.
   const res = await supa(env,
-    'listings?ai_description=is.null&status=eq.active&select=id,title,description,hero_image&limit=5'
+    `listings?ai_description=is.null&status=eq.active&hero_image=not.is.null&select=id,title,description,hero_image&limit=${batchSize}`
   );
   const unprocessed = await res.json();
 
@@ -1546,24 +1558,23 @@ async function processUnembeddedListings(env) {
 
   for (const listing of unprocessed) {
     try {
-      // Step 1: Generate AI description from image
-      const aiDesc = await generateDescription(env, listing);
-      if (!aiDesc) continue;
+      // Step 1: Generate AI description + maker from image
+      const aiResult = await generateDescription(env, listing);
+      if (!aiResult) continue;
+      const aiDesc = typeof aiResult === 'string' ? aiResult : aiResult.description;
+      const maker = (typeof aiResult === 'object' ? aiResult.maker : null);
 
       // Step 2: Generate embedding from combined text (auction data + AI description)
-      // Auction houses provide rich catalog data (artist, medium, period, dimensions)
-      // — embed that alongside the AI visual description for best taste signal
       const combinedText = [listing.title, listing.description, aiDesc].filter(Boolean).join('. ');
       const embedding = await generateEmbedding(env, combinedText);
       if (!embedding) continue;
 
-      // Step 3: Update listing
+      // Step 3: Update listing with description, embedding, and maker if found
+      const updateData = { ai_description: aiDesc, embedding };
+      if (maker) updateData.maker = maker;
       await supa(env, `listings?id=eq.${listing.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({
-          ai_description: aiDesc,
-          embedding: embedding
-        })
+        body: JSON.stringify(updateData)
       });
 
       processed++;
@@ -1599,19 +1610,23 @@ async function generateDescription(env, listing) {
 
   const mimeType = listing.hero_image.includes('.png') ? 'image/png' : 'image/jpeg';
 
-  const prompt = `Analyze this auction/sale listing image of a vintage, antique, or decorative object. Describe it in a single paragraph optimized for embedding similarity search. Include:
-- Object type (vase, chair, sculpture, lamp, painting, textile, etc.)
-- Style/period (mid-century modern, art deco, brutalist, primitive, folk art, Memphis, postmodern, Arts & Crafts, etc.)
-- Material (ceramic, stoneware, wood, brass, bronze, stone, glass, etc.)
-- Color palette and surface qualities (earth tones, patina, matte glaze, polished, weathered, etc.)
-- Aesthetic qualities (organic form, geometric, sculptural, minimal, ornate, textured, etc.)
-- Size impression (small decorative, table-scale, furniture-scale)
-- Any maker/origin indicators if visible
+  const prompt = `Analyze this auction/sale listing image of a vintage, antique, or decorative object. Return a JSON object with two fields:
+
+1. "description": A single paragraph optimized for embedding similarity search. Include:
+   - Object type (vase, chair, sculpture, lamp, painting, textile, etc.)
+   - Style/period (mid-century modern, art deco, brutalist, primitive, folk art, Memphis, postmodern, Arts & Crafts, etc.)
+   - Material (ceramic, stoneware, wood, brass, bronze, stone, glass, etc.)
+   - Color palette and surface qualities
+   - Aesthetic qualities (organic form, geometric, sculptural, minimal, ornate, textured, etc.)
+   - Size impression (small decorative, table-scale, furniture-scale)
+   Write a rich, descriptive paragraph. Do not say "this is" or "the image shows".
+
+2. "maker": The artist, designer, or maker name if identifiable from the title, description, or image. Return null if unknown or if it's a mass-produced item. Only include individual artist/designer names, not company or auction house names.
 
 Title from listing: "${listing.title || 'Unknown'}"
 ${listing.description ? `Description: "${listing.description}"` : ''}
 
-Write a rich, descriptive paragraph. Do not say "this is" or "the image shows". Just describe the object directly.`;
+Return ONLY valid JSON like: {"description": "...", "maker": "..." or null}`;
 
   const body = {
     contents: [{
@@ -1632,7 +1647,18 @@ Write a rich, descriptive paragraph. Do not say "this is" or "the image shows". 
   );
 
   const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+  if (!text) return null;
+
+  // Try to parse as JSON (new format with maker extraction)
+  try {
+    const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    return { description: parsed.description, maker: parsed.maker || null };
+  } catch {
+    // Fallback: old format (plain text description)
+    return { description: text, maker: null };
+  }
 }
 
 function generateTextOnlyDescription(listing) {
