@@ -11,7 +11,7 @@ export default {
 
     try {
       // Route requests
-      if (url.pathname === '/feed' && request.method === 'GET')
+      if (url.pathname === '/feed' && (request.method === 'GET' || request.method === 'POST'))
         return handleFeed(request, url, env);
 
       if (url.pathname === '/swipe' && request.method === 'POST')
@@ -155,6 +155,15 @@ function supaRpc(env, fnName, params = {}) {
 async function handleFeed(request, url, env) {
   const limit = parseInt(url.searchParams.get('limit') || '20');
 
+  // Accept exclude_ids from POST body (items already in client's feed queue)
+  let clientExcludeIds = [];
+  if (request.method === 'POST') {
+    try {
+      const body = await request.json();
+      clientExcludeIds = body.exclude_ids || [];
+    } catch {}
+  }
+
   // Fetch ALL swiped IDs with pagination (Supabase caps at 1000 per request)
   let swipedIds = [];
   let page = 0;
@@ -176,8 +185,12 @@ async function handleFeed(request, url, env) {
     if (rows.length < PAGE_SIZE) break;
     page++;
   }
-  const swipedSet = new Set(swipedIds);
-  const _debugInfo = { swipe_rows: swipedIds.length, swiped_unique: swipedSet.size };
+  const swipedSet = new Set(swipedIds.map(id => String(id)));
+  // Also exclude IDs the client already has in its feed queue
+  if (clientExcludeIds.length > 0) {
+    clientExcludeIds.forEach(id => swipedSet.add(String(id)));
+  }
+  const _debugInfo = { swipe_rows: swipedIds.length, swiped_unique: swipedSet.size, client_excludes: clientExcludeIds.length };
 
   // Get taste profile
   const profileRes = await supa(env, 'taste_profile?id=eq.1&select=*');
@@ -219,12 +232,12 @@ async function handleFeed(request, url, env) {
       return json({ listings: [], _debug: _debugInfo }, 200, request);
     }
 
-    // Filter out already-swiped items in JS
-    const rankedFiltered = ranked.filter(l => !swipedSet.has(l.id)).slice(0, rankedCount);
+    // Filter out already-swiped items in JS (coerce to string for type safety)
+    const rankedFiltered = ranked.filter(l => !swipedSet.has(String(l.id))).slice(0, rankedCount);
     _debugInfo.ranked_after_filter = rankedFiltered.length;
 
     // Random exploration (include listings without embeddings, paginate to find unswiped)
-    const rankedIds = new Set(rankedFiltered.map(r => r.id));
+    const rankedIds = new Set(rankedFiltered.map(r => String(r.id)));
     let randomAll = [];
     for (let rp = 0; rp < 5; rp++) {
       const from = rp * 1000;
@@ -239,7 +252,7 @@ async function handleFeed(request, url, env) {
       });
       const batch = await randomRes.json();
       if (!Array.isArray(batch) || batch.length === 0) break;
-      const unswiped = batch.filter(l => !swipedSet.has(l.id) && !rankedIds.has(l.id));
+      const unswiped = batch.filter(l => !swipedSet.has(String(l.id)) && !rankedIds.has(String(l.id)));
       randomAll = randomAll.concat(unswiped);
       if (randomAll.length >= limit) break; // Got enough
       if (batch.length < 1000) break; // No more pages
@@ -256,7 +269,7 @@ async function handleFeed(request, url, env) {
       `listings?status=eq.active&hero_image=not.is.null&select=${selectFields}&order=scraped_at.desc&limit=${poolSize}`
     );
     const pool = await res.json();
-    const filtered = (Array.isArray(pool) ? pool : []).filter(l => !swipedSet.has(l.id));
+    const filtered = (Array.isArray(pool) ? pool : []).filter(l => !swipedSet.has(String(l.id)));
     listings = shuffle(filtered).slice(0, limit);
   }
 

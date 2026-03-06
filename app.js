@@ -94,7 +94,7 @@
     try {
       const saved = await dbGet('swipedIds');
       if (saved && Array.isArray(saved)) {
-        swipedIds = new Set(saved);
+        swipedIds = new Set(saved.map(id => String(id)));
       }
     } catch (e) {
       console.warn('Failed to load swiped IDs:', e);
@@ -126,7 +126,13 @@
 
   async function fetchFeed() {
     try {
-      const data = await apiFetch('/feed?limit=' + BATCH_SIZE);
+      // Send IDs of items already in the feed queue so server can exclude them
+      const feedIds = feed.slice(feedIndex).map(l => String(l.id));
+      const excludeIds = [...new Set([...feedIds, ...swipedIds])];
+      const data = await apiFetch('/feed?limit=' + BATCH_SIZE, {
+        method: 'POST',
+        body: JSON.stringify({ exclude_ids: excludeIds })
+      });
       return data.listings || [];
     } catch (e) {
       console.error('Feed fetch failed:', e);
@@ -135,9 +141,9 @@
   }
 
   async function recordSwipe(listingId, action) {
-    swipedIds.add(listingId);
+    swipedIds.add(String(listingId));
     saveSwipedIds();
-    const listing = feed.find(l => l.id === listingId);
+    const listing = feed.find(l => String(l.id) === String(listingId));
     const predicted_score = listing?.knn_score != null ? listing.knn_score : (listing?.similarity != null ? Math.round(listing.similarity * 100) : null);
     try {
       await apiFetch('/swipe', {
@@ -517,7 +523,10 @@
   async function loadMoreFeed() {
     const more = await fetchFeed();
     if (more.length > 0) {
-      feed = feed.concat(more);
+      // Deduplicate: skip any items already in the feed
+      const existingIds = new Set(feed.map(l => String(l.id)));
+      const fresh = more.filter(l => !existingIds.has(String(l.id)) && !swipedIds.has(String(l.id)));
+      if (fresh.length > 0) feed = feed.concat(fresh);
     }
   }
 
