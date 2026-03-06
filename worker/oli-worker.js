@@ -340,10 +340,10 @@ async function handleSwipeDupes(request, url, env) {
 
 async function handleProcessBatch(request, env) {
   try {
-    const result = await processUnembeddedListings(env, 10);
+    const result = await processUnembeddedListings(env, 5);
     return json(result, 200, request);
   } catch (e) {
-    return json({ error: e.message }, 500, request);
+    return json({ error: e.message, stack: e.stack?.slice(0, 500) }, 500, request);
   }
 }
 
@@ -1594,18 +1594,24 @@ async function generateDescription(env, listing) {
   let imageBase64;
   try {
     const imgRes = await fetch(listing.hero_image);
+    if (!imgRes.ok) throw new Error(`HTTP ${imgRes.status}`);
     const imgBuf = await imgRes.arrayBuffer();
+    // Skip images over 2MB to avoid CPU time limit
+    if (imgBuf.byteLength > 2 * 1024 * 1024) {
+      console.log(`[OLI] Skipping large image (${(imgBuf.byteLength / 1024 / 1024).toFixed(1)}MB) for ${listing.id}`);
+      return { description: generateTextOnlyDescription(listing), maker: null };
+    }
     // Use chunked approach to avoid max call stack with spread operator
     const bytes = new Uint8Array(imgBuf);
     let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    const CHUNK = 8192;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
     }
     imageBase64 = btoa(binary);
   } catch (e) {
     console.error(`[OLI] Image fetch failed for ${listing.id}:`, e);
-    // Fall back to text-only description
-    return generateTextOnlyDescription(listing);
+    return { description: generateTextOnlyDescription(listing), maker: null };
   }
 
   const mimeType = listing.hero_image.includes('.png') ? 'image/png' : 'image/jpeg';
@@ -1646,7 +1652,18 @@ Return ONLY valid JSON like: {"description": "...", "maker": "..." or null}`;
     }
   );
 
-  const data = await res.json();
+  if (!res.ok) {
+    console.error(`[OLI] Gemini API error: ${res.status}`);
+    return null;
+  }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    console.error('[OLI] Gemini response parse error:', e);
+    return null;
+  }
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
   if (!text) return null;
 
@@ -1663,7 +1680,6 @@ Return ONLY valid JSON like: {"description": "...", "maker": "..." or null}`;
 
 function generateTextOnlyDescription(listing) {
   // Fallback: when no image, use the auction house's own catalog data
-  // For LiveAuctioneers this is rich (artist, medium, date, dimensions)
   return [listing.title, listing.description].filter(Boolean).join('. ');
 }
 
@@ -1681,7 +1697,17 @@ async function generateEmbedding(env, text) {
     }
   );
 
-  const data = await res.json();
+  if (!res.ok) {
+    console.error(`[OLI] Embedding API error: ${res.status}`);
+    return null;
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    console.error('[OLI] Embedding response parse error:', e);
+    return null;
+  }
   return data?.embedding?.values || null;
 }
 
