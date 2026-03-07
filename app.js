@@ -26,9 +26,6 @@
   let startX = 0, startY = 0, deltaX = 0, deltaY = 0;
   let isLoading = false;
   let menuOpen = false;
-  let artistMode = 'list'; // 'list' or 'triage'
-  let triageQueue = [];
-  let triageIndex = 0;
 
   // ── DOM refs ────────────────────────────────────────────
   const scoutView = document.getElementById('scout-view');
@@ -54,17 +51,6 @@
   const superBtn = document.getElementById('super-btn');
   const hateBtn = document.getElementById('hate-btn');
   const actionBtns = document.getElementById('action-btns');
-  // Artist triage
-  const artistListWrap = document.getElementById('artist-list-wrap');
-  const artistTriage = document.getElementById('artist-triage');
-  const artistCardStack = document.getElementById('artist-card-stack');
-  const artistTriageEmpty = document.getElementById('artist-triage-empty');
-  const artistActionBtns = document.getElementById('artist-action-btns');
-  const artistModeList = document.getElementById('artist-mode-list');
-  const artistModeTriage = document.getElementById('artist-mode-triage');
-  const artistDeleteBtn = document.getElementById('artist-delete-btn');
-  const artistArchiveBtn = document.getElementById('artist-archive-btn');
-  const artistSaveBtn = document.getElementById('artist-save-btn');
 
   // ── IndexedDB ───────────────────────────────────────────
   function openDB() {
@@ -766,21 +752,30 @@
       </div>` : '';
 
       return `
-        <div class="artist-item" data-artist-idx="${idx}">
-          ${a.thumbnail ? `<div class="artist-thumb" style="background-image:url('${esc(a.thumbnail)}')"></div>` : `<div class="artist-thumb artist-thumb-empty">${esc(a.name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase())}</div>`}
-          <div class="artist-info">
-            <div class="artist-name">${esc(a.name)}${isNew ? '<span class="artist-new-label">New</span>' : ''}</div>
-            ${sl && sl.swiped ? '<div class="artist-swiped-badge">From your swipes</div>' : ''}
-            <div class="artist-medium">${esc(a.medium || '')}</div>
-            <span class="artist-rep ${esc(repClass)}">${esc(repLabel)}</span>
+        <div class="artist-swipe-wrap" data-artist-name="${esc(a.name)}">
+          <div class="artist-swipe-actions-left"><span class="swipe-action-save">&#9733; Save</span></div>
+          <div class="artist-swipe-actions-right">
+            <span class="swipe-action-archive">Archive</span>
+            <span class="swipe-action-delete">Delete</span>
           </div>
-          <span class="artist-chevron">\u203A</span>
-        </div>
-        <div class="artist-detail hidden" data-detail-idx="${idx}">
-          ${sourceHtml}
-          ${detailRows.join('')}
-          ${links ? `<div class="artist-links">${links}</div>` : ''}
-          ${notesHtml}
+          <div class="artist-swipe-row">
+            <div class="artist-item" data-artist-idx="${idx}" data-artist-name="${esc(a.name)}">
+              ${a.thumbnail ? `<div class="artist-thumb" style="background-image:url('${esc(a.thumbnail)}')"></div>` : `<div class="artist-thumb artist-thumb-empty"></div>`}
+              <div class="artist-info">
+                <div class="artist-name">${esc(a.name)}${isNew ? '<span class="artist-new-label">New</span>' : ''}${a.priority === 'high' ? '<span class="artist-saved-label">Saved</span>' : ''}</div>
+                ${sl && sl.swiped ? '<div class="artist-swiped-badge">From your swipes</div>' : ''}
+                <div class="artist-medium">${esc(a.medium || '')}</div>
+                <span class="artist-rep ${esc(repClass)}">${esc(repLabel)}</span>
+              </div>
+              <span class="artist-chevron">\u203A</span>
+            </div>
+            <div class="artist-detail hidden" data-detail-idx="${idx}">
+              ${sourceHtml}
+              ${detailRows.join('')}
+              ${links ? `<div class="artist-links">${links}</div>` : ''}
+              ${notesHtml}
+            </div>
+          </div>
         </div>
       `;
     }).join('');
@@ -789,32 +784,89 @@
     artistList.querySelectorAll('.artist-item').forEach(item => {
       item.addEventListener('click', () => {
         const idx = item.dataset.artistIdx;
-        const detail = artistList.querySelector(`.artist-detail[data-detail-idx="${idx}"]`);
+        const detail = item.parentElement.querySelector(`.artist-detail[data-detail-idx="${idx}"]`);
         const isExpanded = item.classList.contains('expanded');
 
         // Collapse all others
         artistList.querySelectorAll('.artist-item.expanded').forEach(other => {
+          if (other === item) return;
           other.classList.remove('expanded');
-          const otherDetail = artistList.querySelector(`.artist-detail[data-detail-idx="${other.dataset.artistIdx}"]`);
+          const otherDetail = other.parentElement.querySelector(`.artist-detail[data-detail-idx="${other.dataset.artistIdx}"]`);
           if (otherDetail) otherDetail.classList.add('hidden');
         });
 
         if (!isExpanded) {
           item.classList.add('expanded');
           detail.classList.remove('hidden');
+        } else {
+          item.classList.remove('expanded');
+          detail.classList.add('hidden');
         }
+      });
+    });
+
+    // Swipe-to-reveal on each row
+    artistList.querySelectorAll('.artist-swipe-wrap').forEach(wrap => {
+      const row = wrap.querySelector('.artist-swipe-row');
+      let sx = 0, tx = 0, swiping = false;
+
+      wrap.addEventListener('touchstart', e => {
+        const t = e.touches[0];
+        sx = t.clientX;
+        tx = 0;
+        swiping = true;
+        row.style.transition = 'none';
+      }, { passive: true });
+
+      wrap.addEventListener('touchmove', e => {
+        if (!swiping) return;
+        tx = e.touches[0].clientX - sx;
+        // Clamp: right (save) max 90px, left (archive/delete) max -160px
+        tx = Math.max(-160, Math.min(90, tx));
+        row.style.transform = `translateX(${tx}px)`;
+      }, { passive: true });
+
+      wrap.addEventListener('touchend', () => {
+        if (!swiping) return;
+        swiping = false;
+        row.style.transition = 'transform 0.25s ease';
+        const name = wrap.dataset.artistName;
+
+        if (tx > 70) {
+          // Swiped right far enough → Save
+          row.style.transform = 'translateX(100%)';
+          setTimeout(() => artistAction(name, 'save'), 250);
+        } else if (tx < -120) {
+          // Swiped left far enough → check which zone
+          row.style.transform = 'translateX(-100%)';
+          setTimeout(() => artistAction(name, 'delete'), 250);
+        } else if (tx < -60) {
+          // Partial left → snap to reveal actions
+          row.style.transform = 'translateX(-160px)';
+        } else {
+          // Snap back
+          row.style.transform = 'translateX(0)';
+        }
+        tx = 0;
+      });
+
+      // Tapping revealed action buttons
+      wrap.querySelector('.swipe-action-save').addEventListener('click', () => {
+        artistAction(wrap.dataset.artistName, 'save');
+      });
+      wrap.querySelector('.swipe-action-archive').addEventListener('click', () => {
+        artistAction(wrap.dataset.artistName, 'archive');
+      });
+      wrap.querySelector('.swipe-action-delete').addEventListener('click', () => {
+        artistAction(wrap.dataset.artistName, 'delete');
       });
     });
   }
 
-  // ── Artist Triage ──────────────────────────────────────
-
-  function getNewArtists() {
-    return artists.filter(a => a.source === 'auto_swipe' && a.priority === 'med');
-  }
+  // ── Artist Actions ─────────────────────────────────────
 
   function updateArtistBadge() {
-    const newCount = getNewArtists().length;
+    const newCount = artists.filter(a => a.source === 'auto_swipe' && a.priority === 'med').length;
     const artistTab = tabbar.querySelector('[data-tab="artists"]');
     let badge = artistTab.querySelector('.tab-badge');
     if (newCount > 0) {
@@ -829,151 +881,41 @@
     }
   }
 
-  function switchArtistMode(mode) {
-    artistMode = mode;
-    artistModeList.classList.toggle('active', mode === 'list');
-    artistModeTriage.classList.toggle('active', mode === 'triage');
-
-    if (mode === 'list') {
-      artistListWrap.classList.remove('hidden');
-      artistTriage.classList.add('hidden');
-      artistActionBtns.classList.add('hidden');
-    } else {
-      artistListWrap.classList.add('hidden');
-      artistTriage.classList.remove('hidden');
-      initTriage();
-    }
-  }
-
-  function initTriage() {
-    // Show all non-archived artists in triage, new ones first
-    triageQueue = artists
-      .filter(a => a.priority !== 'archived')
-      .sort((a, b) => {
-        const aNew = a.source === 'auto_swipe' && a.priority === 'med' ? 0 : 1;
-        const bNew = b.source === 'auto_swipe' && b.priority === 'med' ? 0 : 1;
-        return aNew - bNew;
-      });
-    triageIndex = 0;
-    renderTriageCards();
-  }
-
-  function renderTriageCards() {
-    artistCardStack.innerHTML = '';
-
-    if (triageIndex >= triageQueue.length) {
-      artistTriageEmpty.classList.remove('hidden');
-      artistActionBtns.classList.add('hidden');
-      return;
-    }
-
-    artistTriageEmpty.classList.add('hidden');
-    artistActionBtns.classList.remove('hidden');
-
-    // Show up to 2 cards (current + next for stacking)
-    const count = Math.min(2, triageQueue.length - triageIndex);
-    for (let i = count - 1; i >= 0; i--) {
-      const a = triageQueue[triageIndex + i];
-      const isNew = a.source === 'auto_swipe' && a.priority === 'med';
-      const initials = a.name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
-      const meta = [
-        a.age ? `Age ${a.age}` : '',
-        a.location || ''
-      ].filter(Boolean);
-      const repClass = a.rep_status || 'rep-none';
-      const repLabel = a.rep_label || 'Unknown';
-
-      const card = document.createElement('div');
-      card.className = 'artist-card';
-      card.style.zIndex = 10 - i;
-      if (i > 0) card.style.transform = 'scale(0.95) translateY(8px)';
-
-      const sl = a.source_listing;
-      const sourceCardHtml = sl ? `<div class="artist-card-source${sl.swiped ? ' swiped' : ''}">
-        <a href="${esc(sl.url)}" target="_blank" rel="noopener" class="artist-source-link">
-          <img src="${esc(sl.hero_image)}" class="artist-source-img" alt="">
-          <div>
-            <div class="artist-source-label">${sl.swiped ? 'You swiped on this' : 'In inventory'}</div>
-            <div class="artist-source-title">${esc(sl.title)}${sl.price ? ` · $${Number(sl.price).toLocaleString()}` : ''}</div>
-          </div>
-        </a>
-      </div>` : '';
-
-      card.innerHTML = `
-        ${a.thumbnail
-          ? `<div class="artist-card-image" style="background-image:url('${esc(a.thumbnail)}')">
-               ${isNew ? '<span class="artist-card-new-badge">New</span>' : ''}
-             </div>`
-          : `<div class="artist-card-image artist-card-image-empty">
-               ${isNew ? '<span class="artist-card-new-badge">New</span>' : ''}
-               ${initials}
-             </div>`
-        }
-        <div class="artist-card-body">
-          <div class="artist-card-name">${esc(a.name)}</div>
-          ${a.medium ? `<div class="artist-card-medium">${esc(a.medium)}</div>` : ''}
-          <div class="artist-card-meta">
-            <span class="artist-rep ${esc(repClass)}">${esc(repLabel)}</span>
-            ${meta.map(m => `<span class="artist-card-tag">${esc(m)}</span>`).join('')}
-          </div>
-          ${sourceCardHtml}
-          ${a.notes ? `<div class="artist-card-notes">${esc(a.notes)}</div>` : ''}
-        </div>
-      `;
-      artistCardStack.appendChild(card);
-    }
-  }
-
-  async function triageAction(action) {
-    if (triageIndex >= triageQueue.length) return;
-    const a = triageQueue[triageIndex];
-    const topCard = artistCardStack.querySelector('.artist-card');
-    if (!topCard) return;
-
-    // Animate out
-    topCard.classList.add('animating');
-    if (action === 'save') {
-      topCard.style.transform = 'translateX(120%) rotate(15deg)';
-      topCard.style.opacity = '0';
-    } else if (action === 'archive') {
-      topCard.style.transform = 'translateY(-100%) scale(0.8)';
-      topCard.style.opacity = '0';
-    } else {
-      topCard.style.transform = 'translateX(-120%) rotate(-15deg)';
-      topCard.style.opacity = '0';
-    }
-
-    // API call
+  async function artistAction(name, action) {
+    const row = artistList.querySelector(`.artist-item[data-artist-name="${CSS.escape(name)}"]`);
     try {
       if (action === 'delete') {
-        await apiFetch(`/artists?name=${encodeURIComponent(a.name)}`, { method: 'DELETE' });
-        artists = artists.filter(ar => ar.name !== a.name);
+        await apiFetch(`/artists?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+        artists = artists.filter(a => a.name !== name);
       } else if (action === 'save') {
-        await apiFetch('/artists', {
-          method: 'PATCH',
-          body: JSON.stringify({ name: a.name, priority: 'high' })
-        });
-        const found = artists.find(ar => ar.name === a.name);
-        if (found) found.priority = 'high';
+        await apiFetch('/artists', { method: 'PATCH', body: JSON.stringify({ name, priority: 'high' }) });
+        const a = artists.find(a => a.name === name);
+        if (a) a.priority = 'high';
       } else if (action === 'archive') {
-        await apiFetch('/artists', {
-          method: 'PATCH',
-          body: JSON.stringify({ name: a.name, priority: 'archived' })
-        });
-        const found = artists.find(ar => ar.name === a.name);
-        if (found) found.priority = 'archived';
+        await apiFetch('/artists', { method: 'PATCH', body: JSON.stringify({ name, priority: 'archived' }) });
+        const a = artists.find(a => a.name === name);
+        if (a) a.priority = 'archived';
       }
     } catch (e) {
-      console.error('Triage action failed:', e);
+      console.error('Artist action failed:', e);
     }
-
-    updateArtistBadge();
-
-    // Advance after animation
-    setTimeout(() => {
-      triageIndex++;
-      renderTriageCards();
-    }, 350);
+    // Animate row out, then re-render
+    if (row && (action === 'delete' || action === 'archive')) {
+      row.style.transition = 'opacity 0.25s, max-height 0.25s';
+      row.style.opacity = '0';
+      row.style.maxHeight = '0';
+      row.style.overflow = 'hidden';
+      const detail = row.nextElementSibling;
+      if (detail?.classList.contains('artist-detail')) {
+        detail.style.transition = 'opacity 0.25s, max-height 0.25s';
+        detail.style.opacity = '0';
+        detail.style.maxHeight = '0';
+      }
+      setTimeout(() => { renderArtists(); updateArtistBadge(); }, 280);
+    } else {
+      renderArtists();
+      updateArtistBadge();
+    }
   }
 
   // ── Accuracy Chart ─────────────────────────────────────
@@ -1060,7 +1002,6 @@
     artistsView.classList.add('hidden');
     settingsView.classList.add('hidden');
     actionBtns.classList.add('hidden');
-    artistActionBtns.classList.add('hidden');
 
     if (tab === 'scout') {
       scoutView.classList.remove('hidden');
@@ -1072,9 +1013,7 @@
       loadFavorites();
     } else if (tab === 'artists') {
       artistsView.classList.remove('hidden');
-      loadArtists().then(() => {
-        if (artistMode === 'triage') initTriage();
-      });
+      loadArtists();
     } else if (tab === 'settings') {
       settingsView.classList.remove('hidden');
       loadStats();
@@ -1171,15 +1110,6 @@
       hateBtn.addEventListener('click', handleSuperHate);
       favBtn.addEventListener('click', handleFavButton);
       superBtn.addEventListener('click', handleSuperLike);
-
-      // Artist mode toggle
-      artistModeList.addEventListener('click', () => switchArtistMode('list'));
-      artistModeTriage.addEventListener('click', () => switchArtistMode('triage'));
-
-      // Artist triage buttons
-      artistDeleteBtn.addEventListener('click', () => triageAction('delete'));
-      artistArchiveBtn.addEventListener('click', () => triageAction('archive'));
-      artistSaveBtn.addEventListener('click', () => triageAction('save'));
 
       // Pull to refresh
       initPullToRefresh();
