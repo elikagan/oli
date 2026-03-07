@@ -780,19 +780,87 @@
       `;
     }).join('');
 
-    // Attach expand/collapse handlers
-    artistList.querySelectorAll('.artist-item').forEach(item => {
+    // Close any open swipe row
+    function closeAllSwipeRows(except) {
+      artistList.querySelectorAll('.artist-swipe-row').forEach(r => {
+        if (r === except) return;
+        r.style.transition = 'transform 0.25s ease';
+        r.style.transform = 'translateX(0)';
+      });
+    }
+
+    // Swipe-to-reveal + tap-to-expand on each row
+    artistList.querySelectorAll('.artist-swipe-wrap').forEach(wrap => {
+      const row = wrap.querySelector('.artist-swipe-row');
+      const item = wrap.querySelector('.artist-item');
+      let sx = 0, sy = 0, tx = 0, didSwipe = false, isHorizontal = null;
+
+      wrap.addEventListener('touchstart', e => {
+        const t = e.touches[0];
+        sx = t.clientX;
+        sy = t.clientY;
+        tx = 0;
+        didSwipe = false;
+        isHorizontal = null;
+        row.style.transition = 'none';
+      }, { passive: true });
+
+      wrap.addEventListener('touchmove', e => {
+        const t = e.touches[0];
+        const dx = t.clientX - sx;
+        const dy = t.clientY - sy;
+
+        // Determine direction on first significant move
+        if (isHorizontal === null && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+          isHorizontal = Math.abs(dx) > Math.abs(dy);
+        }
+
+        if (!isHorizontal) return; // Let vertical scroll happen
+
+        e.preventDefault(); // Block scroll during horizontal swipe
+        tx = Math.max(-160, Math.min(90, dx));
+        row.style.transform = `translateX(${tx}px)`;
+        if (Math.abs(tx) > 10) didSwipe = true;
+      }, { passive: false });
+
+      wrap.addEventListener('touchend', () => {
+        if (!isHorizontal) return; // Was a vertical scroll, do nothing
+
+        row.style.transition = 'transform 0.25s ease';
+        const name = wrap.dataset.artistName;
+
+        if (tx > 70) {
+          row.style.transform = 'translateX(100%)';
+          setTimeout(() => artistAction(name, 'save'), 250);
+        } else if (tx < -120) {
+          row.style.transform = 'translateX(-100%)';
+          setTimeout(() => artistAction(name, 'delete'), 250);
+        } else if (tx < -50) {
+          // Snap open to reveal actions
+          row.style.transform = 'translateX(-160px)';
+          closeAllSwipeRows(row);
+        } else {
+          row.style.transform = 'translateX(0)';
+        }
+        tx = 0;
+      });
+
+      // Tap to expand/collapse (only if not swiping)
       item.addEventListener('click', () => {
+        if (didSwipe) { didSwipe = false; return; }
+        // Close any open swipe rows first
+        closeAllSwipeRows();
+
         const idx = item.dataset.artistIdx;
-        const detail = item.parentElement.querySelector(`.artist-detail[data-detail-idx="${idx}"]`);
+        const detail = row.querySelector(`.artist-detail[data-detail-idx="${idx}"]`);
         const isExpanded = item.classList.contains('expanded');
 
         // Collapse all others
         artistList.querySelectorAll('.artist-item.expanded').forEach(other => {
           if (other === item) return;
           other.classList.remove('expanded');
-          const otherDetail = other.parentElement.querySelector(`.artist-detail[data-detail-idx="${other.dataset.artistIdx}"]`);
-          if (otherDetail) otherDetail.classList.add('hidden');
+          const od = other.closest('.artist-swipe-row').querySelector(`.artist-detail[data-detail-idx="${other.dataset.artistIdx}"]`);
+          if (od) od.classList.add('hidden');
         });
 
         if (!isExpanded) {
@@ -802,52 +870,6 @@
           item.classList.remove('expanded');
           detail.classList.add('hidden');
         }
-      });
-    });
-
-    // Swipe-to-reveal on each row
-    artistList.querySelectorAll('.artist-swipe-wrap').forEach(wrap => {
-      const row = wrap.querySelector('.artist-swipe-row');
-      let sx = 0, tx = 0, swiping = false;
-
-      wrap.addEventListener('touchstart', e => {
-        const t = e.touches[0];
-        sx = t.clientX;
-        tx = 0;
-        swiping = true;
-        row.style.transition = 'none';
-      }, { passive: true });
-
-      wrap.addEventListener('touchmove', e => {
-        if (!swiping) return;
-        tx = e.touches[0].clientX - sx;
-        // Clamp: right (save) max 90px, left (archive/delete) max -160px
-        tx = Math.max(-160, Math.min(90, tx));
-        row.style.transform = `translateX(${tx}px)`;
-      }, { passive: true });
-
-      wrap.addEventListener('touchend', () => {
-        if (!swiping) return;
-        swiping = false;
-        row.style.transition = 'transform 0.25s ease';
-        const name = wrap.dataset.artistName;
-
-        if (tx > 70) {
-          // Swiped right far enough → Save
-          row.style.transform = 'translateX(100%)';
-          setTimeout(() => artistAction(name, 'save'), 250);
-        } else if (tx < -120) {
-          // Swiped left far enough → check which zone
-          row.style.transform = 'translateX(-100%)';
-          setTimeout(() => artistAction(name, 'delete'), 250);
-        } else if (tx < -60) {
-          // Partial left → snap to reveal actions
-          row.style.transform = 'translateX(-160px)';
-        } else {
-          // Snap back
-          row.style.transform = 'translateX(0)';
-        }
-        tx = 0;
       });
 
       // Tapping revealed action buttons
@@ -860,6 +882,13 @@
       wrap.querySelector('.swipe-action-delete').addEventListener('click', () => {
         artistAction(wrap.dataset.artistName, 'delete');
       });
+    });
+
+    // Tap anywhere else closes open swipe rows
+    artistList.addEventListener('click', (e) => {
+      if (!e.target.closest('.artist-swipe-actions-left') && !e.target.closest('.artist-swipe-actions-right')) {
+        closeAllSwipeRows();
+      }
     });
   }
 
