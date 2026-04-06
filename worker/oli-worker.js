@@ -26,6 +26,7 @@ export default {
       if (p === '/scrape' && m === 'POST') return scrapeHouse(request, env);
       if (p === '/scrape/all' && m === 'POST') return scrapeAllHouses(request, env);
       if (p === '/extract-artists' && m === 'POST') return extractArtists(request, env);
+      if (p === '/link-lots' && m === 'POST') return linkLotsToArtists(request, env);
 
       // Research
       if (p === '/research' && m === 'POST') return researchArtist(request, env);
@@ -39,6 +40,9 @@ export default {
       // Lots
       if (p === '/lots' && m === 'GET') return getLots(request, url, env);
 
+      // Debug
+      if (p === '/debug/scrape-test' && m === 'GET') return debugScrapeTest(request, env);
+
       return new Response('Not found', { status: 404, headers: cors(request) });
     } catch (e) {
       console.error('Worker error:', e);
@@ -48,15 +52,67 @@ export default {
 
   // Cron: scrape completed auctions from houses in rotation
   async scheduled(event, env, ctx) {
-    const houses = Object.entries(TARGET_HOUSES);
-    const hour = new Date().getUTCHours();
-    const idx = Math.floor(hour / 4) % houses.length;
-    const [sellerId, name] = houses[idx];
-    ctx.waitUntil(
-      scrapeCompletedAuctions(env, parseInt(sellerId), name)
-        .then(n => console.log(`[OLI] Cron scraped ${name}: ${n} lots`))
-        .catch(e => console.error(`[OLI] Cron ${name}:`, e))
-    );
+    ctx.waitUntil((async () => {
+      try {
+        // 1. Scrape one house per run (rotates by hour)
+        const houses = Object.entries(TARGET_HOUSES);
+        const hour = new Date().getUTCHours();
+        const idx = Math.floor(hour / 4) % houses.length;
+        const [sellerId, name] = houses[idx];
+        const lots = await scrapeCompletedAuctions(env, parseInt(sellerId), name);
+        console.log(`[OLI] Cron scraped ${name}: ${lots} lots`);
+
+        // 2. Extract artists from unprocessed lots (2 batches of 20)
+        for (let i = 0; i < 2; i++) {
+          const lotsRes = await supa(env, 'oli_lots?artist_name=is.null&select=id,title,auction_house&limit=20');
+          const untagged = await lotsRes.json();
+          if (!Array.isArray(untagged) || !untagged.length) break;
+          const titles = untagged.map((l, j) => `${j}: ${l.title}`).join('\n');
+          const prompt = `You are analyzing auction lot titles to extract artist/designer/maker names.
+For each numbered title, extract the artist or designer name if one is clearly attributable.
+Return ONLY a JSON array: [{"idx": 0, "name": "Full Name"}, ...]
+Skip generic descriptions. Skip "attributed to", "manner of", "after", "school of".
+Clean names: proper case, no dates, no suffixes.\n\nTitles:\n${titles}`;
+          const raw = await gemini(env, prompt, { maxTokens: 8192 });
+          if (!raw) continue;
+          const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+          const jsonStr = cleaned.match(/\[[\s\S]*\]/)?.[0];
+          if (!jsonStr) continue;
+          try {
+            const extracted = JSON.parse(jsonStr);
+            for (const { idx: ei, name: ename } of extracted) {
+              if (ei >= untagged.length || !ename) continue;
+              await supa(env, `oli_lots?id=eq.${untagged[ei].id}`, { method: 'PATCH', body: JSON.stringify({ artist_name: ename }) });
+            }
+            const names = [...new Set(extracted.map(e => e.name).filter(Boolean))];
+            for (const n of names) {
+              const aLots = untagged.filter((l, j) => extracted.find(e => e.idx === j && e.name === n));
+              await supa(env, 'oli_artists', {
+                method: 'POST', body: JSON.stringify({ name: n, auction_houses: [...new Set(aLots.map(l => l.auction_house))] }),
+                headers: { 'Prefer': 'return=minimal,resolution=ignore-duplicates' }
+              });
+            }
+          } catch (e) { console.error('[OLI] Extract parse error:', e.message); }
+        }
+
+        // 3. Research 3 unresearched artists
+        const fakeReq = new Request('http://localhost/research/batch', {
+          method: 'POST', body: JSON.stringify({ limit: 3 }),
+          headers: { 'Content-Type': 'application/json' }
+        });
+        await researchBatch(fakeReq, env);
+
+        // 4. Link lots for 5 artists missing stats
+        const fakeLink = new Request('http://localhost/link-lots', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }
+        });
+        await linkLotsToArtists(fakeLink, env);
+
+        console.log('[OLI] Cron pipeline complete');
+      } catch (e) {
+        console.error('[OLI] Cron error:', e);
+      }
+    })());
   }
 };
 
@@ -74,10 +130,15 @@ const TARGET_HOUSES = {
 const LA_SEARCH_URL = 'https://search-party-prod.liveauctioneers.com/search/v4/web';
 const LA_IMAGE_BASE = 'https://p1.liveauctioneers.com';
 
-// Algolia price results (29M+ records)
-const ALGOLIA_APP = 'NR5KEURV76';
-const ALGOLIA_KEY = '8a1358d26d1fbcdf18d06f7c5f7b5c47';
-const ALGOLIA_URL = `https://${ALGOLIA_APP}-dsn.algolia.net/1/indexes/price_results/query`;
+// Seller page slugs for catalog discovery
+const HOUSE_SLUGS = {
+  3822: 'billings-auction-gallery',
+  8902: 'circa-auction-gallery',
+  237:  'los-angeles-modern-auctions',
+  369:  'wright',
+  176:  'rago-arts-and-auction-center',
+  390:  'uniques-and-antiques-inc'
+};
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -111,7 +172,7 @@ function supa(env, path, opts = {}) {
 }
 
 async function gemini(env, prompt, opts = {}) {
-  const model = opts.model || 'gemini-2.0-flash';
+  const model = opts.model || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_KEY}`;
   const res = await fetch(url, {
     method: 'POST',
@@ -122,76 +183,148 @@ async function gemini(env, prompt, opts = {}) {
     })
   });
   const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text && opts._debug) return { error: true, status: res.status, body: JSON.stringify(data).substring(0, 500) };
+  return text || '';
 }
 
-// ── Scraping: LiveAuctioneers Completed Results ──────────
+// ── Scraping: LiveAuctioneers ─────────────────────────────
+// Strategy:
+// 1. Get catalog IDs from seller page HTML
+// 2. Get item IDs from catalog page HTML
+// 3. Batch-fetch full item details via /content/items API
 
-async function scrapeCompletedAuctions(env, sellerId, houseName, maxPages = 3) {
-  let totalNew = 0;
+const LA_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+  'Origin': 'https://www.liveauctioneers.com',
+  'Referer': 'https://www.liveauctioneers.com/'
+};
 
-  for (let page = 1; page <= maxPages; page++) {
-    const body = {
-      keyword: '',
-      page,
-      pageSize: 60,
-      sort: '-timems',
-      status: ['completed'],
-      seller: [sellerId],
-      priceResult: true
-    };
+const LA_CONTENT_URL = 'https://www.liveauctioneers.com/content/items';
 
-    const res = await fetch(LA_SEARCH_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
+// Get catalog IDs from a seller's page
+async function getSellerCatalogs(sellerId, slug) {
+  const url = `https://www.liveauctioneers.com/auctioneer/${sellerId}/${slug}/`;
+  const res = await fetch(url, { headers: LA_HEADERS });
+  if (!res.ok) return [];
+  const html = await res.text();
+  const matches = html.match(/"catalogId":(\d+)/g) || [];
+  const ids = [...new Set(matches.map(m => parseInt(m.split(':')[1])).filter(id => id > 0))];
+  return ids.sort((a, b) => b - a); // newest first
+}
 
-    if (!res.ok) {
-      console.error(`LA search failed: ${res.status}`);
-      break;
-    }
+// Get item IDs from a catalog page. Returns { itemIds, isDone }
+async function getCatalogItemIds(catalogId) {
+  const url = `https://www.liveauctioneers.com/catalog/${catalogId}/`;
+  const res = await fetch(url, { headers: LA_HEADERS });
+  if (!res.ok) return { itemIds: [], isDone: false };
+  const html = await res.text();
 
+  // Check if catalog is completed
+  const statusMatch = html.match(/"catalogStatus":"([^"]+)"/);
+  const isDone = statusMatch?.[1] === 'done';
+  if (!isDone) return { itemIds: [], isDone: false };
+
+  // Extract item IDs from HTML (works from CF even through Incapsula)
+  const idMatches = html.match(/"itemId":(\d+)/g) || [];
+  const ids = [...new Set(idMatches.map(m => parseInt(m.split(':')[1])).filter(id => id > 1000))];
+  if (!ids.length) return { itemIds: [], isDone: true };
+
+  const minId = Math.min(...ids);
+
+  // Extract total lot count
+  const lotsMatch = html.match(/"lotsListed":(\d+)/);
+  const totalLots = lotsMatch ? parseInt(lotsMatch[1]) : (Math.max(...ids) - minId + 50);
+
+  // Generate sequential IDs from min
+  const result = [];
+  for (let i = 0; i < Math.min(totalLots + 10, 500); i++) {
+    result.push(minId + i);
+  }
+  return { itemIds: result, isDone: true };
+}
+
+// Fetch item details in batches via /content/items API
+async function fetchItemDetails(itemIds) {
+  const items = [];
+  // Batch in groups of 50 (API limit)
+  for (let i = 0; i < itemIds.length; i += 50) {
+    const batch = itemIds.slice(i, i + 50);
+    const lotIds = batch.join(',');
+    const url = `${LA_CONTENT_URL}?c=20170802&identifier=catalog-cover-items-for-quickload&liveStateFetch=false&lotIds=${lotIds}`;
+    const res = await fetch(url, { headers: LA_HEADERS });
+    if (!res.ok) continue;
     const data = await res.json();
-    const records = data?.records || [];
-    if (records.length === 0) break;
+    const batchItems = data?.payload?.items || [];
+    items.push(...batchItems);
+  }
+  return items;
+}
 
-    // Build lot records
-    const lots = records
-      .filter(r => r.priceResult && r.currentBid > 0)
-      .map(r => ({
+// Scrape lots from a single catalog
+async function scrapeCatalog(env, catalogId, houseName) {
+  const { itemIds, isDone } = await getCatalogItemIds(catalogId);
+  if (!isDone || !itemIds.length) return -1; // -1 = not done, 0 = done but empty
+
+  const items = await fetchItemDetails(itemIds);
+  if (!items.length) return 0;
+
+  let totalNew = 0;
+  const lots = items
+    .filter(r => r.isSold && (r.salePrice > 0 || r.leadingBid > 0))
+    .map(r => {
+      const photos = r.photos || [1];
+      const imgBase = `${LA_IMAGE_BASE}/${r.sellerId}/${r.catalogId}/${r.itemId}`;
+      return {
         title: r.title || '',
         lot_number: r.lotNumber?.toString() || null,
         auction_house: houseName,
-        sale_name: r.auctionTitle || null,
-        sale_date: r.endDate ? new Date(r.endDate).toISOString().split('T')[0] : null,
-        hammer_price: r.currentBid || null,
-        currency: r.currencyCode || 'USD',
-        image_urls: r.images?.length
-          ? r.images.slice(0, 6).map(img => `${LA_IMAGE_BASE}/${img}`)
-          : [],
-        la_lot_id: r.lotId?.toString() || null,
-        la_catalog_id: r.catalogId?.toString() || null,
-        source_url: r.lotId ? `https://www.liveauctioneers.com/item/${r.lotId}` : null
-      }));
-
-    if (lots.length === 0) break;
-
-    // Upsert (skip duplicates by la_lot_id)
-    const upsertRes = await supa(env, 'oli_lots', {
-      method: 'POST',
-      body: JSON.stringify(lots),
-      prefer: 'return=representation,resolution=merge-duplicates',
-      headers: { 'Prefer': 'return=representation,resolution=merge-duplicates' }
+        sale_name: r.catalogTitle || null,
+        sale_date: r.saleStartTs
+          ? new Date(r.saleStartTs * 1000).toISOString().split('T')[0]
+          : null,
+        hammer_price: r.salePrice || r.leadingBid || null,
+        currency: r.currency || 'USD',
+        image_urls: photos.slice(0, 6).map(p => `${imgBase}_${p}_x.jpg`),
+        la_lot_id: r.itemId?.toString() || null,
+        la_catalog_id: catalogId.toString(),
+        source_url: `https://www.liveauctioneers.com/item/${r.itemId}`
+      };
     });
 
-    const inserted = await upsertRes.json();
-    totalNew += Array.isArray(inserted) ? inserted.length : 0;
-
-    if (records.length < 60) break; // Last page
+  if (lots.length > 0) {
+    for (let i = 0; i < lots.length; i += 50) {
+      const chunk = lots.slice(i, i + 50);
+      const upsertRes = await supa(env, 'oli_lots', {
+        method: 'POST',
+        body: JSON.stringify(chunk),
+        headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' }
+      });
+      if (upsertRes.ok) totalNew += chunk.length;
+    }
   }
 
   return totalNew;
+}
+
+// Scrape a house: get catalogs, then scrape each
+async function scrapeCompletedAuctions(env, sellerId, houseName, maxCatalogs = 3) {
+  const slug = HOUSE_SLUGS[sellerId] || '';
+  if (!slug) return 0;
+
+  const catalogs = await getSellerCatalogs(sellerId, slug);
+  if (!catalogs.length) return 0;
+
+  let total = 0;
+  let scraped = 0;
+  for (const catId of catalogs) {
+    if (scraped >= maxCatalogs) break;
+    const count = await scrapeCatalog(env, catId, houseName);
+    if (count === -1) continue; // skip non-done catalogs
+    total += count;
+    scraped++;
+  }
+  return total;
 }
 
 // ── POST /scrape — Scrape a specific house ───────────────
@@ -200,8 +333,65 @@ async function scrapeHouse(request, env) {
   const { seller_id, house_name, pages } = await request.json();
   const sid = seller_id || Object.keys(TARGET_HOUSES)[0];
   const name = house_name || TARGET_HOUSES[sid] || 'Unknown';
-  const count = await scrapeCompletedAuctions(env, parseInt(sid), name, pages || 5);
-  return json({ ok: true, house: name, lots_imported: count }, 200, request);
+
+  const slug = HOUSE_SLUGS[parseInt(sid)] || '';
+  const catalogs = await getSellerCatalogs(parseInt(sid), slug);
+
+  const details = { catalogs: catalogs.length };
+  let total = 0;
+  let scraped = 0;
+
+  for (const catId of catalogs) {
+    if (scraped >= (pages || 3)) break;
+    const { itemIds, isDone } = await getCatalogItemIds(catId);
+    if (!isDone) { details[`cat_${catId}`] = 'not_done'; continue; }
+    if (!itemIds.length) { details[`cat_${catId}`] = 'no_items'; continue; }
+
+    details[`cat_${catId}`] = `${itemIds.length} ids`;
+    const items = await fetchItemDetails(itemIds);
+    details[`cat_${catId}_fetched`] = items.length;
+
+    const sold = items.filter(r => r.isSold && (r.salePrice > 0 || r.leadingBid > 0));
+    details[`cat_${catId}_sold`] = sold.length;
+
+    if (sold.length > 0) {
+      const lots = sold.map(r => {
+        const photos = r.photos || [1];
+        const imgBase = `${LA_IMAGE_BASE}/${r.sellerId}/${r.catalogId}/${r.itemId}`;
+        return {
+          title: r.title || '',
+          lot_number: r.lotNumber?.toString() || null,
+          auction_house: name,
+          sale_name: r.catalogTitle || null,
+          sale_date: r.saleStartTs ? new Date(r.saleStartTs * 1000).toISOString().split('T')[0] : null,
+          hammer_price: r.salePrice || r.leadingBid || null,
+          currency: r.currency || 'USD',
+          image_urls: photos.slice(0, 6).map(p => `${imgBase}_${p}_x.jpg`),
+          la_lot_id: r.itemId?.toString() || null,
+          la_catalog_id: catId.toString(),
+          source_url: `https://www.liveauctioneers.com/item/${r.itemId}`
+        };
+      });
+
+      for (let i = 0; i < lots.length; i += 50) {
+        const chunk = lots.slice(i, i + 50);
+        const upsertRes = await supa(env, 'oli_lots', {
+          method: 'POST',
+          body: JSON.stringify(chunk),
+          headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' }
+        });
+        if (upsertRes.ok) {
+          total += chunk.length;
+        } else {
+          const err = await upsertRes.text();
+          details[`cat_${catId}_db_error`] = err.substring(0, 200);
+        }
+      }
+    }
+    scraped++;
+  }
+
+  return json({ ok: true, house: name, lots_imported: total, details }, 200, request);
 }
 
 // ── POST /scrape/all — Scrape all houses ─────────────────
@@ -223,10 +413,12 @@ async function scrapeAllHouses(request, env) {
 // ── POST /extract-artists — Use Gemini to extract artist names from lots ──
 
 async function extractArtists(request, env) {
+  try {
   // Get lots without artist_name
-  const lotsRes = await supa(env, 'oli_lots?artist_name=is.null&select=id,title,auction_house&limit=100');
+  const lotsRes = await supa(env, 'oli_lots?artist_name=is.null&select=id,title,auction_house&limit=20');
   const lots = await lotsRes.json();
-  if (!lots?.length) return json({ ok: true, extracted: 0 }, 200, request);
+  if (!Array.isArray(lots)) return json({ ok: false, error: 'lots_query_failed', detail: JSON.stringify(lots).substring(0, 300) }, 200, request);
+  if (!lots.length) return json({ ok: true, extracted: 0, message: 'no lots without artist_name' }, 200, request);
 
   // Batch titles for Gemini
   const titles = lots.map((l, i) => `${i}: ${l.title}`).join('\n');
@@ -241,12 +433,19 @@ Clean up names: proper capitalization, no dates, no "(American, 1920-2005)" suff
 Titles:
 ${titles}`;
 
-  const raw = await gemini(env, prompt, { maxTokens: 8192 });
+  const raw = await gemini(env, prompt, { maxTokens: 8192, _debug: true });
+  if (raw?.error) return json({ ok: false, error: 'gemini_failed', detail: raw }, 200, request);
+  if (!raw) return json({ ok: false, error: 'gemini_empty', lot_count: lots.length }, 200, request);
+
   let extracted = [];
+  const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+  const jsonStr = cleaned.match(/\[[\s\S]*\]/)?.[0];
+  if (!jsonStr) {
+    return json({ ok: true, extracted: 0, error: 'no_json_found', raw_preview: raw.substring(0, 500) }, 200, request);
+  }
   try {
-    const jsonStr = raw.match(/\[[\s\S]*\]/)?.[0];
     extracted = JSON.parse(jsonStr);
-  } catch { return json({ ok: true, extracted: 0, error: 'parse_failed' }, 200, request); }
+  } catch (e) { return json({ ok: true, extracted: 0, error: 'parse_failed', message: e.message, raw_preview: raw.substring(0, 500) }, 200, request); }
 
   // Update lots with artist names
   let updated = 0;
@@ -276,6 +475,57 @@ ${titles}`;
   }
 
   return json({ ok: true, extracted: updated, new_artists: uniqueNames.length }, 200, request);
+  } catch (err) {
+    return json({ ok: false, error: 'extract_exception', message: err.message, stack: err.stack?.substring(0, 300) }, 500, request);
+  }
+}
+
+// ── POST /link-lots — Link lots to artists by name + update artist stats ──
+
+async function linkLotsToArtists(request, env) {
+  // Get artists that need stats (lot_count is null or 0)
+  const aRes = await supa(env, 'oli_artists?or=(lot_count.is.null,lot_count.eq.0)&select=id,name&limit=5');
+  const artists = await aRes.json();
+  if (!Array.isArray(artists)) return json({ ok: false, error: 'artists_query_failed' }, 200, request);
+  if (!artists.length) return json({ ok: true, message: 'all artists linked', remaining: 0 }, 200, request);
+
+  let linked = 0, statsUpdated = 0;
+  for (const a of artists) {
+    const lotsRes = await supa(env, `oli_lots?artist_name=eq.${encodeURIComponent(a.name)}&select=id,hammer_price,auction_house,image_urls`);
+    const lots = await lotsRes.json();
+    if (!Array.isArray(lots) || !lots.length) {
+      // No lots found — set lot_count to -1 so we don't retry
+      await supa(env, `oli_artists?id=eq.${a.id}`, { method: 'PATCH', body: JSON.stringify({ lot_count: -1 }) });
+      continue;
+    }
+
+    // Link lots
+    for (const lot of lots) {
+      await supa(env, `oli_lots?id=eq.${lot.id}&artist_id=is.null`, {
+        method: 'PATCH',
+        body: JSON.stringify({ artist_id: a.id })
+      });
+      linked++;
+    }
+
+    // Calculate stats
+    const prices = lots.filter(l => l.hammer_price).map(l => parseFloat(l.hammer_price));
+    const houses = [...new Set(lots.map(l => l.auction_house).filter(Boolean))];
+    const images = lots.flatMap(l => (l.image_urls || []).slice(0, 1)).slice(0, 12);
+    const sorted = [...prices].sort((a, b) => a - b);
+
+    const stats = { lot_count: lots.length, auction_houses: houses, image_urls: images };
+    if (prices.length) {
+      stats.max_sale = Math.max(...prices);
+      stats.median_sale = sorted[Math.floor(sorted.length / 2)];
+      stats.avg_sale = Math.round(prices.reduce((s, p) => s + p, 0) / prices.length);
+    }
+
+    await supa(env, `oli_artists?id=eq.${a.id}`, { method: 'PATCH', body: JSON.stringify(stats) });
+    statsUpdated++;
+  }
+
+  return json({ ok: true, processed: artists.length, linked, statsUpdated }, 200, request);
 }
 
 // ── POST /research — Research a single artist ────────────
@@ -704,40 +954,74 @@ async function getOutreach(request, url, env) {
 // ── GET /pipeline/stats ──────────────────────────────────
 
 async function getPipelineStats(request, env) {
-  // Get counts by status
-  const res = await supa(env, 'oli_artists?select=status', { prefer: 'return=representation' });
-  const artists = await res.json();
+  try {
+    const res = await supa(env, 'oli_artists?select=status');
+    const artistsRaw = await res.json();
+    const artists = Array.isArray(artistsRaw) ? artistsRaw : [];
 
-  const counts = {};
-  for (const a of (artists || [])) {
-    counts[a.status] = (counts[a.status] || 0) + 1;
+    const counts = {};
+    for (const a of artists) {
+      counts[a.status] = (counts[a.status] || 0) + 1;
+    }
+
+    return json({
+      pipeline: counts,
+      total_artists: artists.length,
+      total_lots: 0,
+      outreach: {},
+      total_outreach: 0
+    }, 200, request);
+  } catch (e) {
+    return json({ error: e.message, pipeline: {}, total_artists: 0 }, 200, request);
   }
-
-  // Get total lots
-  const lotsRes = await supa(env, 'oli_lots?select=id', {
-    prefer: 'return=representation,count=exact',
-    headers: { 'Prefer': 'return=representation,count=exact,head=true' }
-  });
-  const lotTotal = lotsRes.headers.get('content-range')?.split('/')?.[1] || '0';
-
-  // Get outreach stats
-  const outRes = await supa(env, 'oli_outreach?select=status');
-  const outreach = await outRes.json();
-  const outCounts = {};
-  for (const o of (outreach || [])) {
-    outCounts[o.status] = (outCounts[o.status] || 0) + 1;
-  }
-
-  return json({
-    pipeline: counts,
-    total_artists: artists?.length || 0,
-    total_lots: parseInt(lotTotal),
-    outreach: outCounts,
-    total_outreach: outreach?.length || 0
-  }, 200, request);
 }
 
 // ── Utility ──────────────────────────────────────────────
+
+// ── Debug ────────────────────────────────────────────────
+
+async function debugScrapeTest(request, env) {
+  const catalogs = await getSellerCatalogs(237, 'los-angeles-modern-auctions');
+
+  // Test the /content/items API directly with known LAMA item IDs
+  const testIds = '211402805,211402806,211402807';
+  const contentRes = await fetch(`${LA_CONTENT_URL}?c=20170802&identifier=catalog-cover-items-for-quickload&liveStateFetch=false&lotIds=${testIds}`, {
+    headers: LA_HEADERS
+  });
+  const contentText = await contentRes.text();
+  let contentData = null;
+  try { contentData = JSON.parse(contentText); } catch {}
+
+  // Also check what metadata we can get from a completed catalog page
+  let catDebug = {};
+  for (const c of catalogs.slice(0, 5)) {
+    const res = await fetch(`https://www.liveauctioneers.com/catalog/${c}/`, { headers: LA_HEADERS });
+    const html = await res.text();
+    const statusMatch = html.match(/"catalogStatus":"([^"]+)"/);
+    if (statusMatch?.[1] === 'done') {
+      const lotsMatch = html.match(/"lotsListed":(\d+)/);
+      const itemIdMatches = html.match(/"itemId":(\d+)/g) || [];
+      const itemIds = [...new Set(itemIdMatches.map(m => parseInt(m.split(':')[1])).filter(id => id > 1000))];
+      catDebug = {
+        catalogId: c,
+        lotsListed: lotsMatch ? parseInt(lotsMatch[1]) : null,
+        itemIdsFromHtml: itemIds.slice(0, 5),
+        totalItemIds: itemIds.length
+      };
+      break;
+    }
+  }
+
+  return json({
+    catalogs_found: catalogs.length,
+    content_api_status: contentRes.status,
+    content_api_items: contentData?.payload?.items?.length || 0,
+    content_api_sample: contentData?.payload?.items?.slice(0, 2)?.map(r => ({
+      title: r.title, price: r.salePrice, sold: r.isSold
+    })) || [],
+    catalog_debug: catDebug
+  }, 200, request);
+}
 
 function median(arr) {
   const sorted = [...arr].sort((a, b) => a - b);
