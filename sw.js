@@ -1,8 +1,8 @@
 const CACHE = 'oli-v31';
 const SHELL = [
   './',
-  './style.css',
-  './app.js'
+  './style.css?v=31',
+  './app.js?v=31'
 ];
 
 self.addEventListener('install', e => {
