@@ -3,9 +3,30 @@
 
   const API = 'https://oli-api.objectlesson.workers.dev';
   let artists = [];
-  let currentFilter = 'all';
+  let currentView = 'prospects';
   let currentArtist = null;
   let searchTimeout = null;
+  let filters = { local: true, '65+': true, contact: false };
+
+  // LA metro area cities for "Local" detection
+  const LA_METRO = [
+    'los angeles', 'pasadena', 'altadena', 'south pasadena', 'long beach',
+    'santa monica', 'venice', 'glendale', 'burbank', 'culver city',
+    'west hollywood', 'beverly hills', 'malibu', 'topanga', 'eagle rock',
+    'highland park', 'silver lake', 'echo park', 'el segundo', 'inglewood',
+    'torrance', 'redondo', 'hermosa', 'manhattan beach', 'san pedro',
+    'woodland hills', 'encino', 'sherman oaks', 'studio city', 'north hollywood',
+    'van nuys', 'calabasas', 'arcadia', 'monrovia', 'san marino',
+    'la crescenta', 'la canada', 'claremont', 'pomona', 'whittier',
+    'downey', 'compton', 'chatsworth'
+  ];
+
+  const SOCAL = [
+    ...LA_METRO, 'san diego', 'orange county', 'irvine', 'newport beach',
+    'laguna', 'costa mesa', 'anaheim', 'riverside', 'palm springs',
+    'santa barbara', 'ojai', 'ventura', 'oxnard', 'thousand oaks',
+    'san bernardino', 'joshua tree', 'twentynine palms'
+  ];
 
   // ── DOM refs ────────────────────────────────────────────
   const $ = id => document.getElementById(id);
@@ -16,6 +37,8 @@
   const emailModal = $('email-modal');
   const adminSheet = $('admin-sheet');
   const searchInput = $('search-input');
+  const filterBar = $('filter-bar');
+  const mainEl = $('main');
 
   // ── Init ────────────────────────────────────────────────
   async function init() {
@@ -27,12 +50,22 @@
   }
 
   function bindEvents() {
-    // Pipeline tabs
-    document.querySelectorAll('.ptab').forEach(tab => {
+    // View tabs
+    document.querySelectorAll('.vtab').forEach(tab => {
       tab.addEventListener('click', () => {
-        document.querySelectorAll('.ptab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.vtab').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
-        currentFilter = tab.dataset.status;
+        currentView = tab.dataset.view;
+        updateFilterVisibility();
+        renderArtists();
+      });
+    });
+
+    // Filter chips
+    document.querySelectorAll('.chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        chip.classList.toggle('active');
+        filters[chip.dataset.filter] = chip.classList.contains('active');
         renderArtists();
       });
     });
@@ -53,34 +86,98 @@
       searchTimeout = setTimeout(() => loadArtists(searchInput.value), 300);
     });
 
-    // Detail back
+    // Detail
     $('detail-back').addEventListener('click', closeDetail);
-
-    // Detail status change
     $('detail-status').addEventListener('change', async (e) => {
       if (!currentArtist) return;
       await api('/artists', 'PATCH', { id: currentArtist.id, status: e.target.value });
       currentArtist.status = e.target.value;
-      // Update in list too
       const idx = artists.findIndex(a => a.id === currentArtist.id);
       if (idx >= 0) artists[idx].status = e.target.value;
       renderArtists();
     });
 
-    // Email modal
+    // Email
     $('email-close').addEventListener('click', () => emailModal.classList.add('hidden'));
     $('email-generate').addEventListener('click', generateEmail);
     $('email-send').addEventListener('click', sendEmailAction);
 
-    // Admin actions
+    // Admin
     $('btn-scrape-all').addEventListener('click', scrapeAll);
     $('btn-extract').addEventListener('click', extractArtists);
     $('btn-research').addEventListener('click', researchBatch);
-
-    // Close admin sheet on background click
     adminSheet.addEventListener('click', (e) => {
       if (e.target === adminSheet) hideAdmin();
     });
+  }
+
+  function updateFilterVisibility() {
+    if (currentView === 'prospects') {
+      filterBar.classList.remove('hidden');
+      mainEl.classList.remove('no-filters');
+    } else {
+      filterBar.classList.add('hidden');
+      mainEl.classList.add('no-filters');
+    }
+  }
+
+  // ── Location helpers ────────────────────────────────────
+
+  function isLAMetro(loc) {
+    if (!loc) return false;
+    const l = loc.toLowerCase();
+    return LA_METRO.some(c => l.includes(c));
+  }
+
+  function isSoCal(loc) {
+    if (!loc) return false;
+    const l = loc.toLowerCase();
+    return SOCAL.some(c => l.includes(c));
+  }
+
+  function isCalifornia(loc) {
+    if (!loc) return false;
+    const l = loc.toLowerCase();
+    return l.includes('california') || l.includes(', ca') || l.includes(' ca,') || isSoCal(l);
+  }
+
+  // ── Prospect Score ──────────────────────────────────────
+  // Higher = better prospect for Object Lesson
+
+  function prospectScore(a) {
+    // Dead or too established = not a prospect
+    if (a.alive === false) return -1;
+    if (a.is_too_established) return -1;
+
+    let score = 0;
+
+    // Alive confirmed (vs unknown)
+    if (a.alive === true) score += 10;
+
+    // Age 65+ (our target demographic)
+    if (a.estimated_age && a.estimated_age >= 65) score += 25;
+    else if (a.estimated_age && a.estimated_age >= 50) score += 10;
+
+    // Location: LA metro is gold, SoCal is good, California is okay
+    if (isLAMetro(a.location)) score += 35;
+    else if (isSoCal(a.location)) score += 25;
+    else if (isCalifornia(a.location)) score += 15;
+
+    // Has contact info (actionable)
+    if (a.email) score += 15;
+    if (a.phone) score += 10;
+    if (a.website) score += 5;
+
+    // Price range: sweet spot is $500-$25k (our market)
+    const med = a.median_sale || a.avg_sale || 0;
+    if (med >= 500 && med <= 25000) score += 15;
+    else if (med > 0 && med < 500) score += 5;
+
+    // Has lots = established auction presence
+    const lots = a.lot_count || 0;
+    score += Math.min(lots * 3, 15);
+
+    return score;
   }
 
   // ── API Helper ──────────────────────────────────────────
@@ -96,12 +193,14 @@
     loadingEl.classList.remove('hidden');
     emptyState.classList.add('hidden');
 
-    let url = '/artists?limit=200';
+    let url = '/artists?limit=300';
     if (search) url += `&q=${encodeURIComponent(search)}`;
 
     try {
       const data = await api(url);
       artists = data.artists || [];
+      // Compute scores
+      artists.forEach(a => { a._score = prospectScore(a); });
     } catch (e) {
       console.error('Load failed:', e);
       artists = [];
@@ -109,14 +208,48 @@
 
     loadingEl.classList.add('hidden');
     renderArtists();
-    updatePipelineCounts();
+    updateTabCounts();
+  }
+
+  // ── Filter + Sort ──────────────────────────────────────
+
+  function getFilteredArtists() {
+    let list = artists;
+
+    if (currentView === 'prospects') {
+      // Only alive, not too established
+      list = list.filter(a => a.alive !== false && !a.is_too_established);
+
+      // Apply active filter chips
+      if (filters.local) {
+        list = list.filter(a => isCalifornia(a.location));
+      }
+      if (filters['65+']) {
+        list = list.filter(a => a.estimated_age && a.estimated_age >= 65);
+      }
+      if (filters.contact) {
+        list = list.filter(a => a.email || a.phone || a.website);
+      }
+
+      // Sort by prospect score descending
+      list.sort((a, b) => b._score - a._score);
+
+    } else if (currentView === 'all') {
+      list.sort((a, b) => b._score - a._score);
+
+    } else {
+      // Pipeline stage filter
+      list = list.filter(a => a.status === currentView);
+      list.sort((a, b) => b._score - a._score);
+    }
+
+    return list;
   }
 
   // ── Render Artist List ──────────────────────────────────
+
   function renderArtists() {
-    const filtered = currentFilter === 'all'
-      ? artists
-      : artists.filter(a => a.status === currentFilter);
+    const filtered = getFilteredArtists();
 
     if (filtered.length === 0) {
       artistList.innerHTML = '';
@@ -130,69 +263,105 @@
       const thumb = a.image_urls?.[0] || '';
       const thumbHtml = thumb
         ? `<img class="artist-thumb" src="${esc(thumb)}" alt="" loading="lazy" onerror="this.style.display='none'">`
-        : `<div class="artist-thumb" style="display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#bbb">${esc(a.name?.[0] || '?')}</div>`;
+        : `<div class="artist-thumb" style="display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#bbb">${esc(a.name?.[0] || '?')}</div>`;
 
-      const houses = (a.auction_houses || []).slice(0, 2).map(h =>
-        `<span class="tag tag-house">${esc(h)}</span>`
-      ).join('');
+      // Location signal
+      let locSignal = '';
+      if (isLAMetro(a.location)) {
+        locSignal = '<span class="signal signal-local">LA</span>';
+      } else if (isSoCal(a.location)) {
+        locSignal = '<span class="signal signal-local">SoCal</span>';
+      } else if (isCalifornia(a.location)) {
+        locSignal = '<span class="signal signal-ca">CA</span>';
+      }
 
-      let ageBadge = '';
+      // Age signal
+      let ageSignal = '';
       if (a.alive === false) {
-        ageBadge = '<span class="tag tag-dead">Deceased</span>';
+        ageSignal = '<span class="signal signal-dead">Deceased</span>';
       } else if (a.estimated_age) {
-        ageBadge = `<span class="tag tag-age">${a.estimated_age}y</span>`;
+        ageSignal = `<span class="signal signal-age">${a.estimated_age}y</span>`;
       }
 
-      let statusBadge = '';
-      if (a.status !== 'lead') {
-        statusBadge = `<span class="tag tag-status">${esc(a.status)}</span>`;
+      // Price signal
+      let priceSignal = '';
+      if (a.median_sale) {
+        priceSignal = `<span class="signal signal-price">$${fmtPrice(a.median_sale)} med</span>`;
       }
 
-      let establishedBadge = '';
+      // Too established
+      let estSignal = '';
       if (a.is_too_established) {
-        establishedBadge = '<span class="tag tag-established">Established</span>';
+        estSignal = '<span class="signal signal-established">Too Established</span>';
       }
 
-      const medianStr = a.median_sale ? `~$${fmtPrice(a.median_sale)}` : '';
+      // Contact icons
+      let contactHtml = '';
+      const hasEmail = a.email ? 'has' : '';
+      const hasPhone = a.phone ? 'has' : '';
+      const hasWeb = (a.website || a.instagram) ? 'has' : '';
+      if (hasEmail || hasPhone || hasWeb) {
+        contactHtml = `<div class="contact-icons">
+          ${hasEmail ? `<div class="contact-dot has" title="${esc(a.email)}">@</div>` : ''}
+          ${hasPhone ? `<div class="contact-dot has" title="${esc(a.phone)}">T</div>` : ''}
+          ${hasWeb ? `<div class="contact-dot has" title="Has website">W</div>` : ''}
+        </div>`;
+      }
+
+      // Score display
+      const score = a._score || 0;
+      const scoreClass = score >= 60 ? '' : score >= 30 ? 'score-mid' : 'score-low';
+
+      // Location text (cleaned up)
+      let locText = a.location || '';
+      // Trim to city, state for brevity
+      if (locText.includes(',')) {
+        const parts = locText.split(',').map(s => s.trim());
+        locText = parts.length > 2 ? parts.slice(0, 2).join(', ') : locText;
+      }
 
       return `
         <div class="artist-card" data-id="${a.id}">
           ${thumbHtml}
-          <div class="artist-info">
-            <div class="artist-name">${esc(a.name)}</div>
-            <div class="artist-sub">${esc(a.location || '')}${a.location && a.categories?.length ? ' · ' : ''}${esc((a.categories || []).slice(0, 2).join(', '))}</div>
-            <div class="artist-tags">
-              ${statusBadge}${ageBadge}${establishedBadge}${houses}
+          <div class="artist-body">
+            <div class="artist-row-top">
+              <div class="artist-name">${esc(a.name)}</div>
+              ${score > 0 ? `<div class="artist-score ${scoreClass}">${score}</div>` : ''}
             </div>
-          </div>
-          <div class="artist-stats">
-            <div class="stat-lot-count">${a.lot_count || 0}</div>
-            <div class="stat-label">lots</div>
-            ${medianStr ? `<div class="stat-price">${medianStr}</div>` : ''}
+            <div class="artist-location">${esc(locText)}</div>
+            <div class="artist-signals">
+              ${locSignal}${ageSignal}${priceSignal}${estSignal}${contactHtml}
+            </div>
           </div>
         </div>`;
     }).join('');
 
-    // Bind click
     artistList.querySelectorAll('.artist-card').forEach(card => {
       card.addEventListener('click', () => openDetail(parseInt(card.dataset.id)));
     });
   }
 
-  // ── Pipeline counts in tabs ─────────────────────────────
-  function updatePipelineCounts() {
-    const counts = {};
-    artists.forEach(a => { counts[a.status] = (counts[a.status] || 0) + 1; });
+  // ── Tab counts ─────────────────────────────────────────
 
-    document.querySelectorAll('.ptab').forEach(tab => {
-      const s = tab.dataset.status;
-      const existing = tab.querySelector('.ptab-count');
+  function updateTabCounts() {
+    const alive = artists.filter(a => a.alive !== false && !a.is_too_established);
+    const counts = {
+      prospects: alive.length,
+      contacted: artists.filter(a => a.status === 'contacted').length,
+      responded: artists.filter(a => a.status === 'responded').length,
+      deal: artists.filter(a => a.status === 'deal').length,
+      consigning: artists.filter(a => a.status === 'consigning').length,
+      all: artists.length,
+    };
+
+    document.querySelectorAll('.vtab').forEach(tab => {
+      const v = tab.dataset.view;
+      const existing = tab.querySelector('.vtab-count');
       if (existing) existing.remove();
-
-      const n = s === 'all' ? artists.length : (counts[s] || 0);
+      const n = counts[v] || 0;
       if (n > 0) {
         const span = document.createElement('span');
-        span.className = 'ptab-count';
+        span.className = 'vtab-count';
         span.textContent = n;
         tab.appendChild(span);
       }
@@ -200,11 +369,10 @@
   }
 
   // ── Artist Detail ───────────────────────────────────────
+
   async function openDetail(id) {
     detailOverlay.classList.remove('hidden');
-
-    // Show loading
-    $('detail-name').textContent = 'Loading…';
+    $('detail-name').textContent = 'Loading...';
     $('detail-meta').textContent = '';
     $('detail-summary').innerHTML = '';
     $('detail-contact').innerHTML = '';
@@ -224,28 +392,28 @@
   }
 
   function renderDetail(artist, lots, outreach) {
-    // Header
     $('detail-name').textContent = artist.name;
     const metaParts = [];
     if (artist.estimated_age && artist.alive !== false) metaParts.push(`Age ~${artist.estimated_age}`);
     if (artist.alive === false) metaParts.push('Deceased' + (artist.death_year ? ` (${artist.death_year})` : ''));
     if (artist.location) metaParts.push(artist.location);
+    if (artist._score > 0 || artist.alive !== false) {
+      const s = prospectScore(artist);
+      if (s > 0) metaParts.push(`Score: ${s}`);
+    }
     $('detail-meta').textContent = metaParts.join(' · ');
 
-    // Status select
     const statusSel = $('detail-status');
     statusSel.innerHTML = ['lead','contacted','responded','deal','consigning','passed','disqualified']
       .map(s => `<option value="${s}" ${s === artist.status ? 'selected' : ''}>${s}</option>`)
       .join('');
 
-    // Summary
     if (artist.ai_summary) {
       $('detail-summary').innerHTML = `
         <div class="section-label">About</div>
         <div class="detail-summary-text">${esc(artist.ai_summary)}</div>`;
     }
 
-    // Contact info
     const contacts = [];
     if (artist.email) contacts.push({ label: 'Email', value: `<a href="mailto:${esc(artist.email)}">${esc(artist.email)}</a>` });
     if (artist.website) contacts.push({ label: 'Website', value: `<a href="${esc(artist.website)}" target="_blank">${esc(artist.website.replace(/^https?:\/\//, ''))}</a>` });
@@ -265,7 +433,6 @@
         </div>`;
     }
 
-    // Action buttons
     const btns = [];
     if (artist.email) {
       btns.push(`<button class="btn-primary btn-sm" id="btn-compose">Email ${artist.name.split(' ')[0]}</button>`);
@@ -275,21 +442,14 @@
     }
     $('detail-action-btns').innerHTML = btns.join('');
 
-    if ($('btn-compose')) {
-      $('btn-compose').addEventListener('click', () => openEmailCompose(artist));
-    }
-    if ($('btn-research-one')) {
-      $('btn-research-one').addEventListener('click', () => researchOne(artist.id));
-    }
+    if ($('btn-compose')) $('btn-compose').addEventListener('click', () => openEmailCompose(artist));
+    if ($('btn-research-one')) $('btn-research-one').addEventListener('click', () => researchOne(artist.id));
 
-    // Image grid — collect all lot images
     const allImages = lots.flatMap(l => l.image_urls || []);
     if (allImages.length) {
       $('detail-images').innerHTML = allImages.slice(0, 30).map(url =>
         `<img src="${esc(url)}" alt="" loading="lazy" onerror="this.style.display='none'">`
       ).join('');
-
-      // Lightbox
       $('detail-images').querySelectorAll('img').forEach(img => {
         img.addEventListener('click', () => {
           const lb = document.createElement('div');
@@ -300,10 +460,9 @@
         });
       });
     } else {
-      $('detail-images').innerHTML = '<p style="color:var(--muted);font-size:13px">No images yet. Run scraping to import auction lots.</p>';
+      $('detail-images').innerHTML = '<p style="color:var(--muted);font-size:13px">No images yet.</p>';
     }
 
-    // Lot list
     if (lots.length) {
       $('detail-lots').innerHTML = `
         <div class="section-label">Lot History (${lots.length})</div>
@@ -318,7 +477,6 @@
           </div>`).join('')}`;
     }
 
-    // Outreach history
     if (outreach?.length) {
       $('detail-outreach').innerHTML = `
         <div class="section-label">Outreach History</div>
@@ -340,6 +498,7 @@
   }
 
   // ── Email Compose ───────────────────────────────────────
+
   function openEmailCompose(artist) {
     $('email-to').value = artist.email || '';
     $('email-subject').value = '';
@@ -351,8 +510,7 @@
   async function generateEmail() {
     const btn = $('email-generate');
     btn.disabled = true;
-    btn.textContent = 'Generating…';
-
+    btn.textContent = 'Generating...';
     try {
       const data = await api('/email/generate', 'POST', { artist_id: emailModal._artistId });
       if (data.ok) {
@@ -360,10 +518,7 @@
         $('email-body').value = data.body || '';
         if (data.to && !$('email-to').value) $('email-to').value = data.to;
       }
-    } catch (e) {
-      console.error('Generate failed:', e);
-    }
-
+    } catch (e) { console.error('Generate failed:', e); }
     btn.disabled = false;
     btn.textContent = 'Generate with AI';
   }
@@ -372,52 +527,43 @@
     const to = $('email-to').value.trim();
     const subject = $('email-subject').value.trim();
     const body = $('email-body').value.trim();
-
     if (!to || !subject || !body) return alert('Fill in all fields');
 
     const btn = $('email-send');
     btn.disabled = true;
-    btn.textContent = 'Sending…';
+    btn.textContent = 'Sending...';
 
     try {
       const data = await api('/email/send', 'POST', {
-        artist_id: emailModal._artistId,
-        to, subject, body
+        artist_id: emailModal._artistId, to, subject, body
       });
-
       if (data.ok) {
         emailModal.classList.add('hidden');
-        // Refresh detail to show outreach
         if (currentArtist) openDetail(currentArtist.id);
       } else {
         alert('Send failed: ' + (data.error || 'unknown'));
       }
-    } catch (e) {
-      alert('Send failed: ' + e.message);
-    }
+    } catch (e) { alert('Send failed: ' + e.message); }
 
     btn.disabled = false;
     btn.textContent = 'Send';
   }
 
   // ── Research ────────────────────────────────────────────
+
   async function researchOne(artistId) {
     const btn = $('btn-research-one');
-    if (btn) { btn.disabled = true; btn.textContent = 'Researching…'; }
-
+    if (btn) { btn.disabled = true; btn.textContent = 'Researching...'; }
     try {
       await api('/research', 'POST', { artist_id: artistId });
-      // Reload detail
       openDetail(artistId);
-    } catch (e) {
-      console.error('Research failed:', e);
-    }
+    } catch (e) { console.error('Research failed:', e); }
   }
 
   // ── Admin Panel ─────────────────────────────────────────
+
   async function showAdmin() {
     adminSheet.classList.remove('hidden');
-    // Load stats
     try {
       const data = await api('/pipeline/stats');
       const grid = $('stats-grid');
@@ -434,9 +580,7 @@
           <div class="stat-num">${s.n}</div>
           <div class="stat-lbl">${s.l}</div>
         </div>`).join('');
-    } catch (e) {
-      console.error('Stats failed:', e);
-    }
+    } catch (e) { console.error('Stats failed:', e); }
   }
 
   function hideAdmin() {
@@ -454,9 +598,8 @@
 
   async function scrapeAll() {
     $('import-log').textContent = '';
-    adminLog('Scraping all houses…');
+    adminLog('Scraping all houses...');
     $('btn-scrape-all').disabled = true;
-
     try {
       const data = await api('/scrape/all', 'POST');
       if (data.results) {
@@ -465,32 +608,24 @@
         });
       }
       adminLog('Done!');
-    } catch (e) {
-      adminLog('Error: ' + e.message);
-    }
-
+    } catch (e) { adminLog('Error: ' + e.message); }
     $('btn-scrape-all').disabled = false;
   }
 
   async function extractArtists() {
-    adminLog('Extracting artists from lot titles…');
+    adminLog('Extracting artists...');
     $('btn-extract').disabled = true;
-
     try {
       const data = await api('/extract-artists', 'POST');
       adminLog(`Extracted: ${data.extracted} lots, ${data.new_artists} new artists`);
       await loadArtists();
-    } catch (e) {
-      adminLog('Error: ' + e.message);
-    }
-
+    } catch (e) { adminLog('Error: ' + e.message); }
     $('btn-extract').disabled = false;
   }
 
   async function researchBatch() {
-    adminLog('Researching batch of artists…');
+    adminLog('Researching batch...');
     $('btn-research').disabled = true;
-
     try {
       const data = await api('/research/batch', 'POST', { limit: 5 });
       if (data.results) {
@@ -498,14 +633,12 @@
       }
       adminLog('Done!');
       await loadArtists();
-    } catch (e) {
-      adminLog('Error: ' + e.message);
-    }
-
+    } catch (e) { adminLog('Error: ' + e.message); }
     $('btn-research').disabled = false;
   }
 
   // ── Utility ─────────────────────────────────────────────
+
   function esc(s) {
     if (!s) return '';
     const d = document.createElement('div');

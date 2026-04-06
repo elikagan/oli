@@ -16,29 +16,33 @@
   <header id="topbar">
     <span class="topbar-title">OLI</span>
     <div class="topbar-right">
-      <div class="search-wrap">
-        <input type="text" id="search-input" class="search-input" placeholder="Search artists…">
-      </div>
+      <input type="text" id="search-input" class="search-input" placeholder="Search artists…">
     </div>
   </header>
 
-  <!-- Pipeline Tabs -->
-  <nav id="pipeline-tabs">
-    <button class="ptab active" data-status="all">All</button>
-    <button class="ptab" data-status="lead">Leads</button>
-    <button class="ptab" data-status="contacted">Contacted</button>
-    <button class="ptab" data-status="responded">Responded</button>
-    <button class="ptab" data-status="deal">Deal</button>
-    <button class="ptab" data-status="consigning">Consigning</button>
+  <!-- View Tabs -->
+  <nav id="view-tabs">
+    <button class="vtab active" data-view="prospects">Prospects</button>
+    <button class="vtab" data-view="contacted">Contacted</button>
+    <button class="vtab" data-view="responded">Responded</button>
+    <button class="vtab" data-view="deal">Deal</button>
+    <button class="vtab" data-view="consigning">Consigning</button>
+    <button class="vtab" data-view="all">All</button>
   </nav>
+
+  <!-- Filter chips (prospects view only) -->
+  <div id="filter-bar" class="filter-bar">
+    <button class="chip active" data-filter="local">Local</button>
+    <button class="chip active" data-filter="65+">65+</button>
+    <button class="chip" data-filter="contact">Has Contact</button>
+  </div>
 
   <!-- Main Content -->
   <main id="main">
-    <!-- Artist List -->
     <div id="artist-list" class="artist-list"></div>
     <div id="empty-state" class="empty-state hidden">
-      <p>No artists yet.</p>
-      <p class="empty-sub">Import auction data to get started.</p>
+      <p>No matches.</p>
+      <p class="empty-sub">Try changing your filters.</p>
     </div>
     <div id="loading" class="loading-state hidden">
       <div class="spinner"></div>
@@ -58,25 +62,14 @@
       </div>
     </div>
     <div id="detail-body" class="detail-body">
-      <!-- Summary -->
       <div id="detail-summary" class="detail-section"></div>
-
-      <!-- Contact Info -->
       <div id="detail-contact" class="detail-section"></div>
-
-      <!-- Action Buttons -->
       <div id="detail-action-btns" class="detail-action-btns"></div>
-
-      <!-- Image Grid -->
       <div class="detail-section">
         <div class="section-label">Auction Lots</div>
         <div id="detail-images" class="image-grid"></div>
       </div>
-
-      <!-- Lot List -->
       <div id="detail-lots" class="detail-section"></div>
-
-      <!-- Outreach History -->
       <div id="detail-outreach" class="detail-section"></div>
     </div>
   </section>
@@ -109,7 +102,7 @@
     </div>
   </div>
 
-  <!-- Stats / Admin (bottom sheet) -->
+  <!-- Admin (bottom sheet) -->
   <div id="admin-sheet" class="bottom-sheet hidden">
     <div class="sheet-handle"></div>
     <div class="sheet-content">
@@ -119,7 +112,7 @@
       <div class="import-btns">
         <button id="btn-scrape-all" class="btn-secondary">Scrape All Houses</button>
         <button id="btn-extract" class="btn-secondary">Extract Artists</button>
-        <button id="btn-research" class="btn-secondary">Research Batch (5)</button>
+        <button id="btn-research" class="btn-secondary">Research Batch</button>
       </div>
       <div id="import-log" class="import-log"></div>
     </div>
