@@ -6,7 +6,7 @@
   let currentView = 'prospects';
   let currentArtist = null;
   let searchTimeout = null;
-  let filters = { local: true, '65+': true, contact: false };
+  let filters = { local: false, '65+': false, contact: false };
 
   // LA metro area cities for "Local" detection
   const LA_METRO = [
@@ -260,78 +260,73 @@
     emptyState.classList.add('hidden');
 
     artistList.innerHTML = filtered.map(a => {
-      const thumb = a.image_urls?.[0] || '';
-      const thumbHtml = thumb
-        ? `<img class="artist-thumb" src="${esc(thumb)}" alt="" loading="lazy" onerror="this.style.display='none'">`
-        : `<div class="artist-thumb" style="display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#bbb">${esc(a.name?.[0] || '?')}</div>`;
-
-      // Location signal
-      let locSignal = '';
-      if (isLAMetro(a.location)) {
-        locSignal = '<span class="signal signal-local">LA</span>';
-      } else if (isSoCal(a.location)) {
-        locSignal = '<span class="signal signal-local">SoCal</span>';
-      } else if (isCalifornia(a.location)) {
-        locSignal = '<span class="signal signal-ca">CA</span>';
+      // Image strip — show up to 4 lot images
+      const images = (a.image_urls || []).slice(0, 4);
+      let imageHtml = '';
+      if (images.length) {
+        imageHtml = `<div class="card-images">${images.map(url =>
+          `<img src="${esc(url)}" alt="" loading="lazy" onerror="this.parentElement.removeChild(this)">`
+        ).join('')}</div>`;
+      } else {
+        imageHtml = `<div class="card-images"><div class="img-placeholder">${esc(a.name?.[0] || '?')}</div></div>`;
       }
 
-      // Age signal
-      let ageSignal = '';
-      if (a.alive === false) {
-        ageSignal = '<span class="signal signal-dead">Deceased</span>';
-      } else if (a.estimated_age) {
-        ageSignal = `<span class="signal signal-age">${a.estimated_age}y</span>`;
-      }
-
-      // Price signal
-      let priceSignal = '';
-      if (a.median_sale) {
-        priceSignal = `<span class="signal signal-price">$${fmtPrice(a.median_sale)} med</span>`;
-      }
-
-      // Too established
-      let estSignal = '';
-      if (a.is_too_established) {
-        estSignal = '<span class="signal signal-established">Too Established</span>';
-      }
-
-      // Contact icons
-      let contactHtml = '';
-      const hasEmail = a.email ? 'has' : '';
-      const hasPhone = a.phone ? 'has' : '';
-      const hasWeb = (a.website || a.instagram) ? 'has' : '';
-      if (hasEmail || hasPhone || hasWeb) {
-        contactHtml = `<div class="contact-icons">
-          ${hasEmail ? `<div class="contact-dot has" title="${esc(a.email)}">@</div>` : ''}
-          ${hasPhone ? `<div class="contact-dot has" title="${esc(a.phone)}">T</div>` : ''}
-          ${hasWeb ? `<div class="contact-dot has" title="Has website">W</div>` : ''}
-        </div>`;
-      }
-
-      // Score display
+      // Score
       const score = a._score || 0;
       const scoreClass = score >= 60 ? '' : score >= 30 ? 'score-mid' : 'score-low';
 
-      // Location text (cleaned up)
-      let locText = a.location || '';
-      // Trim to city, state for brevity
-      if (locText.includes(',')) {
-        const parts = locText.split(',').map(s => s.trim());
-        locText = parts.length > 2 ? parts.slice(0, 2).join(', ') : locText;
+      // Location badge
+      let locBadge = '';
+      if (isLAMetro(a.location)) locBadge = '<span class="card-loc-badge badge-la">LA</span>';
+      else if (isSoCal(a.location)) locBadge = '<span class="card-loc-badge badge-socal">SoCal</span>';
+      else if (isCalifornia(a.location)) locBadge = '<span class="card-loc-badge badge-ca">CA</span>';
+
+      // Detail line: location, age, price
+      const details = [];
+      if (a.location) {
+        let loc = a.location;
+        if (loc.includes(',')) {
+          const parts = loc.split(',').map(s => s.trim());
+          loc = parts.length > 2 ? parts.slice(0, 2).join(', ') : loc;
+        }
+        details.push(locBadge + esc(loc));
       }
+      if (a.alive === false) {
+        details.push('<span style="color:var(--red)">Deceased</span>');
+      } else if (a.estimated_age) {
+        details.push(a.estimated_age + ' years old');
+      }
+      if (a.median_sale) {
+        details.push('$' + fmtPrice(a.median_sale) + ' median sale');
+      }
+      if (a.lot_count) {
+        details.push('<span style="font-family:var(--mono)">' + a.lot_count + '</span> auction lots');
+      }
+
+      // Contact links
+      const contacts = [];
+      if (a.email) contacts.push(`<span class="card-contact-link">Email</span>`);
+      if (a.phone) contacts.push(`<span class="card-contact-link">Phone</span>`);
+      if (a.website) contacts.push(`<span class="card-contact-link">Website</span>`);
+      if (a.instagram) contacts.push(`<span class="card-contact-link">Instagram</span>`);
+
+      // Banners
+      let banner = '';
+      if (a.is_too_established) banner = '<div class="card-established-banner">Too established for outreach</div>';
 
       return `
         <div class="artist-card" data-id="${a.id}">
-          ${thumbHtml}
-          <div class="artist-body">
-            <div class="artist-row-top">
-              <div class="artist-name">${esc(a.name)}</div>
-              ${score > 0 ? `<div class="artist-score ${scoreClass}">${score}</div>` : ''}
+          ${imageHtml}
+          <div class="card-body">
+            <div class="card-row-top">
+              <div class="card-name">${esc(a.name)}</div>
+              ${score > 0 ? `<div class="card-score ${scoreClass}">${score}</div>` : ''}
             </div>
-            <div class="artist-location">${esc(locText)}</div>
-            <div class="artist-signals">
-              ${locSignal}${ageSignal}${priceSignal}${estSignal}${contactHtml}
+            <div class="card-details">
+              ${details.map(d => `<div class="card-detail-line">${d}</div>`).join('')}
             </div>
+            ${contacts.length ? `<div class="card-contact">${contacts.join('')}</div>` : ''}
+            ${banner}
           </div>
         </div>`;
     }).join('');
