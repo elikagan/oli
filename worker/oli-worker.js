@@ -1,113 +1,87 @@
 // OLI — Object Lesson Intelligence
-// Cloudflare Worker: scraping, AI processing, taste ranking, API
+// Artist Prospecting CRM — Cloudflare Worker API
+// Scrapes past auction results, identifies living artists 65+, manages outreach pipeline
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders(request) });
-    }
+    if (request.method === 'OPTIONS')
+      return new Response(null, { status: 204, headers: cors(request) });
 
     try {
-      // Route requests
-      if (url.pathname === '/feed' && (request.method === 'GET' || request.method === 'POST'))
-        return handleFeed(request, url, env);
+      const p = url.pathname;
+      const m = request.method;
 
-      if (url.pathname === '/swipe' && request.method === 'POST')
-        return handleSwipe(request, env);
+      // Artists
+      if (p === '/artists' && m === 'GET') return getArtists(request, url, env);
+      if (p === '/artists' && m === 'PATCH') return patchArtist(request, env);
+      if (p.match(/^\/artists\/\d+$/) && m === 'GET') return getArtist(request, url, env);
+      if (p.match(/^\/artists\/\d+$/) && m === 'DELETE') return deleteArtist(request, url, env);
+      if (p.match(/^\/artists\/\d+\/lots$/) && m === 'GET') return getArtistLots(request, url, env);
 
-      if (url.pathname === '/favorites' && request.method === 'GET')
-        return handleGetFavorites(request, env);
+      // Pipeline
+      if (p === '/pipeline/stats' && m === 'GET') return getPipelineStats(request, env);
 
-      if (url.pathname === '/favorites' && request.method === 'POST')
-        return handleAddFavorite(request, env);
+      // Scraping & Import
+      if (p === '/scrape' && m === 'POST') return scrapeHouse(request, env);
+      if (p === '/scrape/all' && m === 'POST') return scrapeAllHouses(request, env);
+      if (p === '/extract-artists' && m === 'POST') return extractArtists(request, env);
 
-      if (url.pathname.startsWith('/favorites/') && request.method === 'DELETE')
-        return handleDeleteFavorite(request, url, env);
+      // Research
+      if (p === '/research' && m === 'POST') return researchArtist(request, env);
+      if (p === '/research/batch' && m === 'POST') return researchBatch(request, env);
 
-      if (url.pathname === '/scrape' && request.method === 'POST')
-        return handleScrape(request, env);
+      // Email
+      if (p === '/email/generate' && m === 'POST') return generateEmail(request, env);
+      if (p === '/email/send' && m === 'POST') return sendEmail(request, env);
+      if (p === '/outreach' && m === 'GET') return getOutreach(request, url, env);
 
-      if (url.pathname === '/process' && request.method === 'POST')
-        return handleProcess(request, env);
+      // Lots
+      if (p === '/lots' && m === 'GET') return getLots(request, url, env);
 
-      if (url.pathname === '/debug-process' && request.method === 'POST')
-        return handleDebugProcess(request, env);
-
-      if (url.pathname === '/stats' && request.method === 'GET')
-        return handleStats(request, env);
-
-      if (url.pathname === '/stats/accuracy-history' && request.method === 'GET')
-        return handleAccuracyHistory(request, env);
-
-      if (url.pathname === '/debug/swipe-dupes' && request.method === 'GET')
-        return handleSwipeDupes(request, url, env);
-
-      if (url.pathname === '/admin/cleanup-nk' && request.method === 'POST')
-        return handleCleanupNK(request, env);
-
-      if (url.pathname === '/admin/process' && request.method === 'POST')
-        return handleProcessBatch(request, env);
-
-      if (url.pathname === '/fix-houses' && request.method === 'POST')
-        return handleFixHouses(request, env);
-
-      if (url.pathname === '/rebuild-taste' && request.method === 'POST')
-        return handleRebuildTaste(request, env);
-
-      if (url.pathname === '/migrate' && request.method === 'POST')
-        return handleMigrate(request, env);
-
-      if (url.pathname === '/scrape/craigslist' && request.method === 'POST')
-        return handleScrapeCraigslist(request, env);
-
-      if (url.pathname === '/artists' && request.method === 'GET')
-        return handleGetArtists(request, env);
-
-      if (url.pathname === '/artists' && request.method === 'POST')
-        return handleImportArtists(request, env);
-
-      if (url.pathname === '/artists' && request.method === 'PATCH')
-        return handlePatchArtist(request, env);
-
-      if (url.pathname === '/artists' && request.method === 'DELETE')
-        return handleDeleteArtist(request, env, url);
-
-      return new Response('Not found', { status: 404, headers: corsHeaders(request) });
+      return new Response('Not found', { status: 404, headers: cors(request) });
     } catch (e) {
       console.error('Worker error:', e);
       return json({ error: e.message }, 500, request);
     }
   },
 
-  // Cron trigger — scrape one house per run (rotates through them)
+  // Cron: scrape completed auctions from houses in rotation
   async scheduled(event, env, ctx) {
-    const sellerIds = Object.keys(LA_SELLERS);
-    // Use hour of day to rotate which house gets scraped
+    const houses = Object.entries(TARGET_HOUSES);
     const hour = new Date().getUTCHours();
-    const idx = Math.floor(hour / 4) % sellerIds.length; // 6 cron runs/day, rotate through houses
-    const sellerId = parseInt(sellerIds[idx]);
-    const houseName = LA_SELLERS[sellerId];
-    // Also scrape one Craigslist category per run (rotates through 5 searches)
-    const clIdx = Math.floor(hour / 4) % CL_SEARCHES.length;
-    const clSearch = CL_SEARCHES[clIdx];
+    const idx = Math.floor(hour / 4) % houses.length;
+    const [sellerId, name] = houses[idx];
     ctx.waitUntil(
-      Promise.all([
-        scrapeSellerListings(env, sellerId, houseName)
-          .then(count => console.log(`[OLI] Cron scraped ${houseName}: ${count} new`))
-          .catch(e => console.error(`[OLI] Cron failed for ${houseName}:`, e)),
-        scrapeCraigslistSearch(env, clSearch)
-          .then(count => console.log(`[OLI] Cron CL ${clSearch.name}: ${count} new`))
-          .catch(e => console.error(`[OLI] Cron CL ${clSearch.name} failed:`, e))
-      ])
+      scrapeCompletedAuctions(env, parseInt(sellerId), name)
+        .then(n => console.log(`[OLI] Cron scraped ${name}: ${n} lots`))
+        .catch(e => console.error(`[OLI] Cron ${name}:`, e))
     );
   }
 };
 
-// ── CORS ──────────────────────────────────────────────────
+// ── Config ────────────────────────────────────────────────
 
-function corsHeaders(request) {
+const TARGET_HOUSES = {
+  3822: 'Billings',
+  8902: 'Circa',
+  237:  'LAMA',
+  369:  'Wright',
+  176:  'Rago',
+  390:  'Uniques and Antiques'
+};
+
+const LA_SEARCH_URL = 'https://search-party-prod.liveauctioneers.com/search/v4/web';
+const LA_IMAGE_BASE = 'https://p1.liveauctioneers.com';
+
+// Algolia price results (29M+ records)
+const ALGOLIA_APP = 'NR5KEURV76';
+const ALGOLIA_KEY = '8a1358d26d1fbcdf18d06f7c5f7b5c47';
+const ALGOLIA_URL = `https://${ALGOLIA_APP}-dsn.algolia.net/1/indexes/price_results/query`;
+
+// ── Helpers ───────────────────────────────────────────────
+
+function cors(request) {
   const origin = request?.headers?.get('Origin') || '*';
   return {
     'Access-Control-Allow-Origin': origin,
@@ -119,15 +93,12 @@ function corsHeaders(request) {
 function json(data, status = 200, request) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...corsHeaders(request), 'Content-Type': 'application/json' }
+    headers: { ...cors(request), 'Content-Type': 'application/json' }
   });
 }
 
-// ── Supabase Helpers ──────────────────────────────────────
-
 function supa(env, path, opts = {}) {
-  const url = `${env.SUPABASE_URL}/rest/v1/${path}`;
-  return fetch(url, {
+  return fetch(`${env.SUPABASE_URL}/rest/v1/${path}`, {
     ...opts,
     headers: {
       'apikey': env.SUPABASE_SERVICE_KEY,
@@ -139,1695 +110,637 @@ function supa(env, path, opts = {}) {
   });
 }
 
-function supaRpc(env, fnName, params = {}) {
-  const url = `${env.SUPABASE_URL}/rest/v1/rpc/${fnName}`;
-  return fetch(url, {
+async function gemini(env, prompt, opts = {}) {
+  const model = opts.model || 'gemini-2.0-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_KEY}`;
+  const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'apikey': env.SUPABASE_SERVICE_KEY,
-      'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(params)
-  });
-}
-
-// ── GET /feed ─────────────────────────────────────────────
-// Returns ranked listings for the swipe UI
-
-async function handleFeed(request, url, env) {
-  const limit = parseInt(url.searchParams.get('limit') || '20');
-
-  // Accept exclude_ids from POST body (items already in client's feed queue)
-  let clientExcludeIds = [];
-  if (request.method === 'POST') {
-    try {
-      const body = await request.json();
-      clientExcludeIds = body.exclude_ids || [];
-    } catch {}
-  }
-
-  // Fetch ALL swiped IDs with pagination (Supabase caps at 1000 per request)
-  let swipedIds = [];
-  let page = 0;
-  const PAGE_SIZE = 1000;
-  while (true) {
-    const from = page * PAGE_SIZE;
-    const to = from + PAGE_SIZE - 1;
-    const res = await fetch(`${env.SUPABASE_URL}/rest/v1/swipes?select=listing_id`, {
-      headers: {
-        'apikey': env.SUPABASE_SERVICE_KEY,
-        'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
-        'Content-Type': 'application/json',
-        'Range': `${from}-${to}`
-      }
-    });
-    const rows = await res.json();
-    if (!Array.isArray(rows) || rows.length === 0) break;
-    swipedIds = swipedIds.concat(rows.map(r => r.listing_id));
-    if (rows.length < PAGE_SIZE) break;
-    page++;
-  }
-  const swipedSet = new Set(swipedIds.map(id => String(id)));
-  // Also exclude IDs the client already has in its feed queue
-  if (clientExcludeIds.length > 0) {
-    clientExcludeIds.forEach(id => swipedSet.add(String(id)));
-  }
-  const _debugInfo = { swipe_rows: swipedIds.length, swiped_unique: swipedSet.size, client_excludes: clientExcludeIds.length };
-
-  // Get taste profile
-  const profileRes = await supa(env, 'taste_profile?id=eq.1&select=*');
-  const profiles = await profileRes.json();
-  const profile = profiles[0];
-
-  let listings;
-
-  const selectFields = 'id,platform,platform_id,title,description,price,location,url,hero_image,image_urls,auction_house,auction_date,lot_number,ai_description,maker,auction_data';
-
-  // Parse centroids (pgvector returns strings)
-  const parseCentroid = (c) => {
-    if (!c) return null;
-    if (Array.isArray(c)) return c;
-    if (typeof c === 'string') { try { return JSON.parse(c); } catch { return null; } }
-    return null;
-  };
-  const posCentroid = parseCentroid(profile?.positive_centroid);
-  const negCentroid = parseCentroid(profile?.negative_centroid);
-
-  if (posCentroid && (profile?.positive_count || 0) >= 10) {
-    // ── Ranked mode: taste model with negative centroid ──
-    const rankedCount = Math.ceil(limit * 0.8);
-    const randomCount = limit - rankedCount;
-
-    // Fetch more from RPC to account for JS-side filtering of swiped items
-    const rpcParams = {
-      query_embedding: posCentroid,
-      match_count: swipedSet.size + limit + 50
-    };
-    if (negCentroid) rpcParams.neg_embedding = negCentroid;
-
-    const matchRes = await supaRpc(env, 'match_listings', rpcParams);
-    const ranked = await matchRes.json();
-    _debugInfo.rpc_status = matchRes.status;
-    _debugInfo.ranked_count = Array.isArray(ranked) ? ranked.length : 'not_array';
-    if (!Array.isArray(ranked)) {
-      _debugInfo.rpc_error = JSON.stringify(ranked).slice(0, 200);
-      return json({ listings: [], _debug: _debugInfo }, 200, request);
-    }
-
-    // Filter out already-swiped items in JS (coerce to string for type safety)
-    const rankedFiltered = ranked.filter(l => !swipedSet.has(String(l.id))).slice(0, rankedCount);
-    _debugInfo.ranked_after_filter = rankedFiltered.length;
-
-    // Random exploration (include listings without embeddings, paginate to find unswiped)
-    const rankedIds = new Set(rankedFiltered.map(r => String(r.id)));
-    let randomAll = [];
-    for (let rp = 0; rp < 5; rp++) {
-      const from = rp * 1000;
-      const to = from + 999;
-      const randomRes = await fetch(`${env.SUPABASE_URL}/rest/v1/listings?status=eq.active&hero_image=not.is.null&select=${selectFields}&order=scraped_at.desc`, {
-        headers: {
-          'apikey': env.SUPABASE_SERVICE_KEY,
-          'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
-          'Content-Type': 'application/json',
-          'Range': `${from}-${to}`
-        }
-      });
-      const batch = await randomRes.json();
-      if (!Array.isArray(batch) || batch.length === 0) break;
-      const unswiped = batch.filter(l => !swipedSet.has(String(l.id)) && !rankedIds.has(String(l.id)));
-      randomAll = randomAll.concat(unswiped);
-      if (randomAll.length >= limit) break; // Got enough
-      if (batch.length < 1000) break; // No more pages
-    }
-    const random = shuffle(randomAll).slice(0, Math.max(randomCount, limit - rankedFiltered.length));
-    _debugInfo.random_found = randomAll.length;
-    _debugInfo.random_used = random.length;
-
-    listings = [...rankedFiltered, ...random];
-  } else {
-    // ── Cold start: fetch pool, exclude swiped, shuffle ──
-    const poolSize = Math.min(limit * 5, 500);
-    const res = await supa(env,
-      `listings?status=eq.active&hero_image=not.is.null&select=${selectFields}&order=scraped_at.desc&limit=${poolSize}`
-    );
-    const pool = await res.json();
-    const filtered = (Array.isArray(pool) ? pool : []).filter(l => !swipedSet.has(String(l.id)));
-    listings = shuffle(filtered).slice(0, limit);
-  }
-
-  // k-NN prediction: score each listing by its nearest swiped neighbors
-  if (listings && listings.length > 0) {
-    try {
-      const targetIds = listings.map(l => l.id);
-      const knnRes = await supaRpc(env, 'predict_knn', { target_ids: targetIds, k: 10 });
-      const knnData = await knnRes.json();
-      if (Array.isArray(knnData)) {
-        const knnMap = new Map(knnData.map(r => [r.listing_id, r.knn_score]));
-        listings.forEach(l => {
-          const knn = knnMap.get(l.id);
-          if (knn != null) l.knn_score = Math.round(knn * 100);
-        });
-      }
-    } catch (e) {
-      console.error('k-NN prediction failed:', e);
-    }
-  }
-
-  listings = shuffle(listings || []);
-
-  return json({ listings }, 200, request);
-}
-
-async function handleSwipeDupes(request, url, env) {
-  // Find listings swiped more than once
-  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/swipes?select=listing_id,action,created_at&order=created_at.desc`, {
-    headers: {
-      'apikey': env.SUPABASE_SERVICE_KEY,
-      'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
-      'Range': '0-99999',
-      'Content-Type': 'application/json'
-    }
-  });
-  const rows = await res.json();
-  if (!Array.isArray(rows)) return json({ error: 'failed to fetch swipes' }, 500, request);
-
-  // Count swipes per listing
-  const counts = {};
-  rows.forEach(r => {
-    if (!counts[r.listing_id]) counts[r.listing_id] = [];
-    counts[r.listing_id].push({ action: r.action, at: r.created_at });
-  });
-
-  const dupes = Object.entries(counts)
-    .filter(([, swipes]) => swipes.length > 1)
-    .sort((a, b) => b[1].length - a[1].length)
-    .slice(0, 20);
-
-  // Get titles for dupe listings
-  const dupeIds = dupes.map(([id]) => id);
-  let titles = {};
-  if (dupeIds.length > 0) {
-    const listRes = await supa(env, `listings?id=in.(${dupeIds.join(',')})&select=id,title`);
-    const listRows = await listRes.json();
-    if (Array.isArray(listRows)) listRows.forEach(l => titles[l.id] = l.title);
-  }
-
-  // Also show most recent 5 swipes
-  const recent = rows.slice(0, 5).map(r => ({
-    listing_id: r.listing_id,
-    action: r.action,
-    at: r.created_at,
-    title: titles[r.listing_id] || '?'
-  }));
-
-  return json({
-    total_swipes: rows.length,
-    unique_listings_swiped: Object.keys(counts).length,
-    duplicates: dupes.map(([id, swipes]) => ({
-      listing_id: id,
-      title: titles[id] || '?',
-      swipe_count: swipes.length,
-      swipes
-    })),
-    recent_5: recent
-  }, 200, request);
-}
-
-async function handleProcessBatch(request, env) {
-  try {
-    const result = await processUnembeddedListings(env, 5);
-    return json(result, 200, request);
-  } catch (e) {
-    return json({ error: e.message, stack: e.stack?.slice(0, 500) }, 500, request);
-  }
-}
-
-async function handleCleanupNK(request, env) {
-  // Mark cheap NK listings as inactive (under $50 = pencils, magnets, openers, etc.)
-  const cheapRes = await fetch(`${env.SUPABASE_URL}/rest/v1/listings?auction_house=eq.Nickey%20Kehoe&status=eq.active&price=lt.50&select=id,title,price`, {
-    headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`, 'Range': '0-999' }
-  });
-  const cheap = await cheapRes.json();
-
-  // Also get null-price NK listings (events, consultancies)
-  const nullRes = await fetch(`${env.SUPABASE_URL}/rest/v1/listings?auction_house=eq.Nickey%20Kehoe&status=eq.active&price=is.null&select=id,title`, {
-    headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`, 'Range': '0-999' }
-  });
-  const nullPrice = await nullRes.json();
-
-  const toDeactivate = [...(Array.isArray(cheap) ? cheap : []), ...(Array.isArray(nullPrice) ? nullPrice : [])];
-  const ids = toDeactivate.map(l => l.id);
-
-  if (ids.length > 0) {
-    // Batch update in groups of 100
-    for (let i = 0; i < ids.length; i += 100) {
-      const batch = ids.slice(i, i + 100);
-      await fetch(`${env.SUPABASE_URL}/rest/v1/listings?id=in.(${batch.join(',')})`, {
-        method: 'PATCH',
-        headers: {
-          'apikey': env.SUPABASE_SERVICE_KEY,
-          'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=minimal'
-        },
-        body: JSON.stringify({ status: 'inactive' })
-      });
-    }
-  }
-
-  return json({
-    deactivated: ids.length,
-    samples: toDeactivate.slice(0, 10).map(l => ({ title: l.title, price: l.price || null }))
-  }, 200, request);
-}
-
-function shuffle(arr) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
-// ── POST /swipe ───────────────────────────────────────────
-
-async function handleSwipe(request, env) {
-  const { listing_id, action, predicted_score } = await request.json();
-
-  if (!listing_id || !['left', 'right', 'favorite', 'super_like', 'super_hate'].includes(action)) {
-    return json({ error: 'Invalid swipe' }, 400, request);
-  }
-
-  // Record swipe with prediction score for accuracy tracking
-  const swipeData = { listing_id, action };
-  if (predicted_score != null) swipeData.predicted_score = predicted_score;
-  await supa(env, 'swipes', {
-    method: 'POST',
-    body: JSON.stringify(swipeData)
-  });
-
-  // Update taste profile if listing has embedding
-  const listingRes = await supa(env, `listings?id=eq.${listing_id}&select=embedding,maker,hero_image,title`);
-  const listings = await listingRes.json();
-  const listing = listings[0];
-  if (listing?.embedding) {
-    await updateTasteProfile(env, listing.embedding, action);
-  }
-
-  // Auto-add artist on positive swipe if listing has a maker
-  const positive = ['right', 'favorite', 'super_like'];
-  if (positive.includes(action) && listing?.maker) {
-    try {
-      await supa(env, 'artists?on_conflict=name', {
-        method: 'POST',
-        body: JSON.stringify([{
-          name: listing.maker,
-          source: 'auto_swipe',
-          priority: 'med'
-        }]),
-        headers: { 'Prefer': 'return=minimal,resolution=ignore-duplicates' }
-      });
-    } catch (e) {
-      console.error('Auto-add artist failed:', e);
-    }
-  }
-
-  return json({ ok: true }, 200, request);
-}
-
-// ── Taste Profile Update ──────────────────────────────────
-
-async function updateTasteProfile(env, embedding, action) {
-  const side = (action === 'left' || action === 'super_hate') ? 'negative' : 'positive';
-  const centroidKey = side + '_centroid';
-  const countKey = side + '_count';
-
-  // Weighted signals: super=3x, favorite=2x, regular=1x
-  const weight = (action === 'super_hate' || action === 'super_like') ? 3
-    : (action === 'favorite') ? 2 : 1;
-
-  // Get current profile
-  const res = await supa(env, 'taste_profile?id=eq.1&select=*');
-  const profiles = await res.json();
-  let profile = profiles[0];
-
-  if (!profile) {
-    const initial = {
-      id: 1,
-      positive_centroid: null,
-      negative_centroid: null,
-      positive_count: 0,
-      negative_count: 0
-    };
-    await supa(env, 'taste_profile', {
-      method: 'POST',
-      body: JSON.stringify(initial)
-    });
-    profile = initial;
-  }
-
-  const currentCentroid = profile[centroidKey];
-  const currentCount = profile[countKey] || 0;
-  const newCount = currentCount + weight;
-
-  let newCentroid;
-  if (!currentCentroid) {
-    newCentroid = embedding;
-  } else {
-    // Running weighted average: (old * count + new * weight) / (count + weight)
-    newCentroid = currentCentroid.map((v, i) =>
-      (v * currentCount + embedding[i] * weight) / newCount
-    );
-  }
-
-  // Update profile
-  await supa(env, 'taste_profile?id=eq.1', {
-    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      [centroidKey]: newCentroid,
-      [countKey]: newCount,
-      updated_at: new Date().toISOString()
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: opts.temperature || 0.3, maxOutputTokens: opts.maxTokens || 4096 }
     })
-  });
-}
-
-// ── GET /favorites ────────────────────────────────────────
-
-async function handleGetFavorites(request, env) {
-  const res = await supa(env,
-    'favorites?select=id,notes,status,created_at,listing:listings(id,title,description,price,location,url,hero_image,platform,auction_house,auction_date)&order=created_at.desc'
-  );
-  const favorites = await res.json();
-  return json({ favorites: favorites || [] }, 200, request);
-}
-
-// ── POST /favorites ───────────────────────────────────────
-
-async function handleAddFavorite(request, env) {
-  const { listing_id } = await request.json();
-  if (!listing_id) return json({ error: 'Missing listing_id' }, 400, request);
-
-  const res = await supa(env, 'favorites', {
-    method: 'POST',
-    body: JSON.stringify({ listing_id }),
-    headers: { 'Prefer': 'return=representation,resolution=merge-duplicates' }
   });
   const data = await res.json();
-  return json({ favorite: data[0] }, 201, request);
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
 
-// ── DELETE /favorites/:id ─────────────────────────────────
+// ── Scraping: LiveAuctioneers Completed Results ──────────
 
-async function handleDeleteFavorite(request, url, env) {
-  const id = url.pathname.split('/').pop();
-  await supa(env, `favorites?id=eq.${id}`, { method: 'DELETE' });
-  return json({ ok: true }, 200, request);
-}
+async function scrapeCompletedAuctions(env, sellerId, houseName, maxPages = 3) {
+  let totalNew = 0;
 
-// ── GET /stats ────────────────────────────────────────────
+  for (let page = 1; page <= maxPages; page++) {
+    const body = {
+      keyword: '',
+      page,
+      pageSize: 60,
+      sort: '-timems',
+      status: ['completed'],
+      seller: [sellerId],
+      priceResult: true
+    };
 
-async function handleStats(request, env) {
-  const profileRes = await supa(env, 'taste_profile?id=eq.1&select=positive_count,negative_count');
-  const profiles = await profileRes.json();
-  const profile = profiles[0] || { positive_count: 0, negative_count: 0 };
+    const res = await fetch(LA_SEARCH_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
 
-  const favCountRes = await supa(env, 'favorites?select=id', { headers: { 'Prefer': 'count=exact' } });
-  const favCount = parseInt(favCountRes.headers.get('content-range')?.split('/')[1] || '0');
-
-  const listingCountRes = await supa(env, 'listings?status=eq.active&select=id', { headers: { 'Prefer': 'count=exact' } });
-  const listingCount = parseInt(listingCountRes.headers.get('content-range')?.split('/')[1] || '0');
-
-  // Prediction accuracy: analyze scored swipes
-  let accuracy = null;
-  try {
-    const scoredRes = await supa(env, 'swipes?predicted_score=not.is.null&select=listing_id,action,predicted_score&order=created_at.desc&limit=500');
-    const scoredRaw = await scoredRes.json();
-    // Deduplicate: keep only the latest swipe per listing (already ordered desc)
-    const seen = new Set();
-    const scored = [];
-    if (Array.isArray(scoredRaw)) {
-      for (const s of scoredRaw) {
-        if (!seen.has(s.listing_id)) {
-          seen.add(s.listing_id);
-          scored.push(s);
-        }
-      }
+    if (!res.ok) {
+      console.error(`LA search failed: ${res.status}`);
+      break;
     }
-    if (scored.length >= 10) {
-      const positive = ['right', 'favorite', 'super_like'];
-      let correct = 0;
-      scored.forEach(s => {
-        const liked = positive.includes(s.action);
-        const predicted = s.predicted_score > 50;
-        if (liked === predicted) correct++;
-      });
-      accuracy = {
-        total_scored: scored.length,
-        correct,
-        pct: Math.round((correct / scored.length) * 100),
-        avg_liked_score: Math.round(scored.filter(s => positive.includes(s.action)).reduce((sum, s) => sum + s.predicted_score, 0) / Math.max(1, scored.filter(s => positive.includes(s.action)).length)),
-        avg_skipped_score: Math.round(scored.filter(s => !positive.includes(s.action)).reduce((sum, s) => sum + s.predicted_score, 0) / Math.max(1, scored.filter(s => !positive.includes(s.action)).length))
-      };
-    }
-  } catch (e) {
-    console.error('Accuracy calc failed:', e);
+
+    const data = await res.json();
+    const records = data?.records || [];
+    if (records.length === 0) break;
+
+    // Build lot records
+    const lots = records
+      .filter(r => r.priceResult && r.currentBid > 0)
+      .map(r => ({
+        title: r.title || '',
+        lot_number: r.lotNumber?.toString() || null,
+        auction_house: houseName,
+        sale_name: r.auctionTitle || null,
+        sale_date: r.endDate ? new Date(r.endDate).toISOString().split('T')[0] : null,
+        hammer_price: r.currentBid || null,
+        currency: r.currencyCode || 'USD',
+        image_urls: r.images?.length
+          ? r.images.slice(0, 6).map(img => `${LA_IMAGE_BASE}/${img}`)
+          : [],
+        la_lot_id: r.lotId?.toString() || null,
+        la_catalog_id: r.catalogId?.toString() || null,
+        source_url: r.lotId ? `https://www.liveauctioneers.com/item/${r.lotId}` : null
+      }));
+
+    if (lots.length === 0) break;
+
+    // Upsert (skip duplicates by la_lot_id)
+    const upsertRes = await supa(env, 'oli_lots', {
+      method: 'POST',
+      body: JSON.stringify(lots),
+      prefer: 'return=representation,resolution=merge-duplicates',
+      headers: { 'Prefer': 'return=representation,resolution=merge-duplicates' }
+    });
+
+    const inserted = await upsertRes.json();
+    totalNew += Array.isArray(inserted) ? inserted.length : 0;
+
+    if (records.length < 60) break; // Last page
   }
 
-  return json({
-    positive_count: profile.positive_count,
-    negative_count: profile.negative_count,
-    favorites_count: favCount,
-    active_listings: listingCount,
-    accuracy
-  }, 200, request);
+  return totalNew;
 }
 
-// ── GET /stats/accuracy-history ──────────────────────────
+// ── POST /scrape — Scrape a specific house ───────────────
 
-async function handleAccuracyHistory(request, env) {
-  try {
-    const scoredRes = await supa(env, 'swipes?predicted_score=not.is.null&select=listing_id,action,predicted_score,created_at&order=created_at.asc&limit=1000');
-    const scoredRaw = await scoredRes.json();
-    // Deduplicate: keep only the first swipe per listing (asc order)
-    const seenIds = new Set();
-    const scored = [];
-    if (Array.isArray(scoredRaw)) {
-      for (const s of scoredRaw) {
-        if (!seenIds.has(s.listing_id)) {
-          seenIds.add(s.listing_id);
-          scored.push(s);
-        }
-      }
+async function scrapeHouse(request, env) {
+  const { seller_id, house_name, pages } = await request.json();
+  const sid = seller_id || Object.keys(TARGET_HOUSES)[0];
+  const name = house_name || TARGET_HOUSES[sid] || 'Unknown';
+  const count = await scrapeCompletedAuctions(env, parseInt(sid), name, pages || 5);
+  return json({ ok: true, house: name, lots_imported: count }, 200, request);
+}
+
+// ── POST /scrape/all — Scrape all houses ─────────────────
+
+async function scrapeAllHouses(request, env) {
+  const results = {};
+  // Process sequentially to stay within subrequest limits
+  for (const [sid, name] of Object.entries(TARGET_HOUSES)) {
+    try {
+      const count = await scrapeCompletedAuctions(env, parseInt(sid), name, 3);
+      results[name] = count;
+    } catch (e) {
+      results[name] = `error: ${e.message}`;
     }
-    if (scored.length < 10) {
-      return json({ points: [] }, 200, request);
-    }
-
-    const positive = ['right', 'favorite', 'super_like'];
-    const windowSize = 20;
-    const points = [];
-
-    for (let i = windowSize - 1; i < scored.length; i++) {
-      const window = scored.slice(i - windowSize + 1, i + 1);
-      let correct = 0;
-      window.forEach(s => {
-        const liked = positive.includes(s.action);
-        const predicted = s.predicted_score > 50;
-        if (liked === predicted) correct++;
-      });
-      points.push({
-        date: scored[i].created_at,
-        accuracy: Math.round((correct / windowSize) * 100),
-        index: i + 1
-      });
-    }
-
-    // Downsample to ~30 points max
-    if (points.length > 30) {
-      const step = Math.ceil(points.length / 30);
-      const downsampled = [];
-      for (let i = 0; i < points.length; i += step) {
-        downsampled.push(points[i]);
-      }
-      if (downsampled[downsampled.length - 1] !== points[points.length - 1]) {
-        downsampled.push(points[points.length - 1]);
-      }
-      return json({ points: downsampled }, 200, request);
-    }
-
-    return json({ points }, 200, request);
-  } catch (e) {
-    console.error('Accuracy history failed:', e);
-    return json({ points: [] }, 200, request);
   }
+  return json({ ok: true, results }, 200, request);
 }
 
-// ── POST /rebuild-taste ──────────────────────────────────
+// ── POST /extract-artists — Use Gemini to extract artist names from lots ──
 
-async function handleRebuildTaste(request, env) {
+async function extractArtists(request, env) {
+  // Get lots without artist_name
+  const lotsRes = await supa(env, 'oli_lots?artist_name=is.null&select=id,title,auction_house&limit=100');
+  const lots = await lotsRes.json();
+  if (!lots?.length) return json({ ok: true, extracted: 0 }, 200, request);
+
+  // Batch titles for Gemini
+  const titles = lots.map((l, i) => `${i}: ${l.title}`).join('\n');
+
+  const prompt = `You are analyzing auction lot titles to extract artist/designer/maker names.
+For each numbered title, extract the artist or designer name if one is clearly attributable.
+Return ONLY a JSON array of objects: [{"idx": 0, "name": "Full Name"}, ...]
+Skip titles that are generic descriptions with no clear maker (e.g. "Antique oak table", "Lot of pottery").
+Skip "attributed to", "manner of", "after", "school of" — we need real names.
+Clean up names: proper capitalization, no dates, no "(American, 1920-2005)" suffixes.
+
+Titles:
+${titles}`;
+
+  const raw = await gemini(env, prompt, { maxTokens: 8192 });
+  let extracted = [];
   try {
-  // Incremental rebuild: process a batch of swipes each call
-  // Accepts ?reset=1 to start fresh, otherwise continues from current profile
-  const url = new URL(request.url);
-  const reset = url.searchParams.get('reset') === '1';
-  const batchOffset = parseInt(url.searchParams.get('offset') || '0');
-  const batchSize = 10; // Stay well under 50 subrequest limit
+    const jsonStr = raw.match(/\[[\s\S]*\]/)?.[0];
+    extracted = JSON.parse(jsonStr);
+  } catch { return json({ ok: true, extracted: 0, error: 'parse_failed' }, 200, request); }
 
-  // Get current profile (or reset)
-  if (reset) {
-    await supa(env, 'taste_profile?id=eq.1', {
+  // Update lots with artist names
+  let updated = 0;
+  for (const { idx, name } of extracted) {
+    if (idx >= lots.length || !name) continue;
+    const lot = lots[idx];
+    await supa(env, `oli_lots?id=eq.${lot.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({
-        positive_centroid: null, negative_centroid: null,
-        positive_count: 0, negative_count: 0,
-        updated_at: new Date().toISOString()
-      })
+      body: JSON.stringify({ artist_name: name })
+    });
+    updated++;
+  }
+
+  // Upsert new artists into oli_artists
+  const uniqueNames = [...new Set(extracted.map(e => e.name).filter(Boolean))];
+  for (const name of uniqueNames) {
+    // Get house info for this artist
+    const artistLots = lots.filter((l, i) => extracted.find(e => e.idx === i && e.name === name));
+    const houses = [...new Set(artistLots.map(l => l.auction_house))];
+
+    await supa(env, 'oli_artists', {
+      method: 'POST',
+      body: JSON.stringify({ name, auction_houses: houses }),
+      prefer: 'return=minimal,resolution=ignore-duplicates',
+      headers: { 'Prefer': 'return=minimal,resolution=ignore-duplicates' }
     });
   }
 
-  // Fetch a batch of swipes
-  const swipesRes = await supa(env,
-    `swipes?select=listing_id,action&order=created_at.asc&limit=${batchSize}&offset=${batchOffset}`
-  );
-  const swipes = await swipesRes.json();
-  if (!Array.isArray(swipes) || swipes.length === 0) {
-    return json({ ok: true, done: true, offset: batchOffset, message: 'All swipes processed' }, 200, request);
-  }
+  return json({ ok: true, extracted: updated, new_artists: uniqueNames.length }, 200, request);
+}
 
-  // Get current profile
-  const profRes = await supa(env, 'taste_profile?id=eq.1&select=*');
-  const profiles = await profRes.json();
-  let profile = profiles[0] || { positive_centroid: null, negative_centroid: null, positive_count: 0, negative_count: 0 };
+// ── POST /research — Research a single artist ────────────
 
-  // pgvector may return centroids as strings — parse them
-  const parseCentroid = (c) => {
-    if (!c) return null;
-    if (Array.isArray(c)) return c;
-    if (typeof c === 'string') {
-      try { return JSON.parse(c); } catch { return null; }
-    }
-    return null;
+async function researchArtist(request, env) {
+  const { artist_id } = await request.json();
+  if (!artist_id) return json({ error: 'artist_id required' }, 400, request);
+
+  const aRes = await supa(env, `oli_artists?id=eq.${artist_id}&select=*`);
+  const artists = await aRes.json();
+  if (!artists?.length) return json({ error: 'not found' }, 404, request);
+  const artist = artists[0];
+
+  // Get their lots for context
+  const lotsRes = await supa(env, `oli_lots?artist_name=eq.${encodeURIComponent(artist.name)}&select=title,hammer_price,auction_house,sale_date,image_urls&order=sale_date.desc&limit=50`);
+  const lots = await lotsRes.json();
+
+  // Calculate auction stats
+  const prices = lots.filter(l => l.hammer_price).map(l => parseFloat(l.hammer_price));
+  const stats = {
+    lot_count: lots.length,
+    max_sale: prices.length ? Math.max(...prices) : null,
+    median_sale: prices.length ? median(prices) : null,
+    avg_sale: prices.length ? Math.round(prices.reduce((a, b) => a + b, 0) / prices.length * 100) / 100 : null,
+    auction_houses: [...new Set(lots.map(l => l.auction_house))],
+    categories: [],
+    image_urls: lots.flatMap(l => l.image_urls || []).slice(0, 30)
   };
-  let posCentroid = parseCentroid(profile.positive_centroid);
-  let negCentroid = parseCentroid(profile.negative_centroid);
-  let posCount = profile.positive_count || 0;
-  let negCount = profile.negative_count || 0;
-  let processed = 0, skipped = 0;
 
-  // Process each swipe individually (fetch embedding one at a time to stay under limits)
-  for (const swipe of swipes) {
-    const listRes = await supa(env, `listings?id=eq.${swipe.listing_id}&select=embedding`);
-    const listings = await listRes.json();
-    const rawEmb = listings?.[0]?.embedding;
-    const embedding = parseCentroid(rawEmb);
-
-    if (!embedding) { skipped++; continue; }
-
-    const side = (swipe.action === 'left' || swipe.action === 'super_hate') ? 'negative' : 'positive';
-    const weight = (swipe.action === 'super_hate' || swipe.action === 'super_like') ? 3
-      : (swipe.action === 'favorite') ? 2 : 1;
-
-    if (side === 'positive') {
-      const newCount = posCount + weight;
-      posCentroid = !posCentroid ? embedding
-        : posCentroid.map((v, i) => (v * posCount + embedding[i] * weight) / newCount);
-      posCount = newCount;
-    } else {
-      const newCount = negCount + weight;
-      negCentroid = !negCentroid ? embedding
-        : negCentroid.map((v, i) => (v * negCount + embedding[i] * weight) / newCount);
-      negCount = newCount;
-    }
-    processed++;
+  // Step 1: Wikidata lookup for birth/death
+  let wikidata = {};
+  try {
+    wikidata = await wikidataLookup(artist.name);
+  } catch (e) {
+    console.error('Wikidata error:', e);
   }
 
-  // Save progress
-  await supa(env, 'taste_profile?id=eq.1', {
+  // Step 2: Gemini web research
+  const lotContext = lots.slice(0, 10).map(l =>
+    `"${l.title}" — $${l.hammer_price || '?'} at ${l.auction_house}`
+  ).join('\n');
+
+  const researchPrompt = `Research the artist/designer "${artist.name}" for a gallery owner looking to potentially work with them.
+
+Known auction lots:
+${lotContext}
+
+${wikidata.birthYear ? `Born: ${wikidata.birthYear}` : ''}
+${wikidata.deathYear ? `Died: ${wikidata.deathYear}` : ''}
+
+Please determine:
+1. Are they alive or dead? (best guess if uncertain)
+2. Estimated birth year and current age
+3. Where do they live/work? (city, state/country)
+4. Their website URL (if any)
+5. Their Instagram handle (if any)
+6. Their email (if publicly available)
+7. Gallery representation (list galleries)
+8. Are they "too established"? (repped by top-tier galleries like Gagosian/Pace/Hauser & Wirth, pieces regularly sell for $100k+, median over $25k)
+9. What categories describe their work? (art, furniture, lighting, sculpture, ceramics, etc.)
+10. A 2-3 sentence summary of who they are and their work, written for a dealer.
+
+Return as JSON:
+{
+  "alive": true/false/null,
+  "birth_year": number or null,
+  "estimated_age": number or null,
+  "death_year": number or null,
+  "location": "City, State" or null,
+  "website": "url" or null,
+  "instagram": "@handle" or null,
+  "email": "email" or null,
+  "gallery_rep": ["Gallery Name", ...] or [],
+  "is_too_established": true/false,
+  "disqualify_reason": "reason" or null,
+  "categories": ["art", "furniture", ...],
+  "ai_summary": "2-3 sentence summary"
+}`;
+
+  const raw = await gemini(env, researchPrompt, { temperature: 0.2, maxTokens: 2048 });
+  let research = {};
+  try {
+    const jsonStr = raw.match(/\{[\s\S]*\}/)?.[0];
+    research = JSON.parse(jsonStr);
+  } catch {
+    research = { ai_summary: 'Research failed to parse' };
+  }
+
+  // Merge wikidata with Gemini results (wikidata takes precedence for dates)
+  const update = {
+    alive: wikidata.deathYear ? false : (research.alive ?? null),
+    birth_year: wikidata.birthYear || research.birth_year || null,
+    death_year: wikidata.deathYear || research.death_year || null,
+    estimated_age: null,
+    location: research.location || null,
+    website: research.website || null,
+    instagram: research.instagram || null,
+    email: research.email || null,
+    gallery_rep: research.gallery_rep || [],
+    is_too_established: research.is_too_established || false,
+    disqualify_reason: research.disqualify_reason || null,
+    categories: research.categories || [],
+    ai_summary: research.ai_summary || null,
+    research_status: 'complete',
+    wikidata_id: wikidata.id || null,
+    last_researched_at: new Date().toISOString(),
+    ...stats
+  };
+
+  // Calculate age
+  if (update.birth_year && update.alive !== false) {
+    update.estimated_age = new Date().getFullYear() - update.birth_year;
+  } else if (research.estimated_age) {
+    update.estimated_age = research.estimated_age;
+  }
+
+  await supa(env, `oli_artists?id=eq.${artist_id}`, {
     method: 'PATCH',
+    body: JSON.stringify(update)
+  });
+
+  return json({ ok: true, artist: artist.name, ...update }, 200, request);
+}
+
+// ── POST /research/batch — Research multiple artists ─────
+
+async function researchBatch(request, env) {
+  const { limit: batchLimit } = await request.json().catch(() => ({}));
+  const lim = batchLimit || 5;
+
+  // Get unresearched artists, prioritize those with more lots
+  const res = await supa(env, `oli_artists?research_status=eq.pending&alive=is.null&select=id,name&order=lot_count.desc.nullsfirst&limit=${lim}`);
+  const artists = await res.json();
+  if (!artists?.length) return json({ ok: true, researched: 0, message: 'none pending' }, 200, request);
+
+  const results = [];
+  for (const a of artists) {
+    try {
+      // Simulate a request to researchArtist
+      const fakeReq = new Request('http://localhost/research', {
+        method: 'POST',
+        body: JSON.stringify({ artist_id: a.id }),
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const r = await researchArtist(fakeReq, env);
+      const data = await r.json();
+      results.push({ id: a.id, name: a.name, status: data.ok ? 'done' : 'error' });
+    } catch (e) {
+      results.push({ id: a.id, name: a.name, status: 'error', error: e.message });
+      // Mark as failed so we don't retry endlessly
+      await supa(env, `oli_artists?id=eq.${a.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ research_status: 'failed' })
+      });
+    }
+  }
+
+  return json({ ok: true, researched: results.length, results }, 200, request);
+}
+
+// ── Wikidata SPARQL Lookup ───────────────────────────────
+
+async function wikidataLookup(name) {
+  const sparql = `
+    SELECT ?person ?birthDate ?deathDate WHERE {
+      ?person rdfs:label "${name}"@en .
+      ?person wdt:P31 wd:Q5 .
+      OPTIONAL { ?person wdt:P569 ?birthDate }
+      OPTIONAL { ?person wdt:P570 ?deathDate }
+    } LIMIT 1`;
+
+  const url = `https://query.wikidata.org/sparql?query=${encodeURIComponent(sparql)}&format=json`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'OLI-ArtistResearch/1.0 (objectlesson.la)' }
+  });
+
+  if (!res.ok) return {};
+  const data = await res.json();
+  const binding = data?.results?.bindings?.[0];
+  if (!binding) return {};
+
+  return {
+    id: binding.person?.value?.split('/').pop() || null,
+    birthYear: binding.birthDate?.value ? new Date(binding.birthDate.value).getFullYear() : null,
+    deathYear: binding.deathDate?.value ? new Date(binding.deathDate.value).getFullYear() : null
+  };
+}
+
+// ── Email Generation ─────────────────────────────────────
+
+async function generateEmail(request, env) {
+  const { artist_id } = await request.json();
+  if (!artist_id) return json({ error: 'artist_id required' }, 400, request);
+
+  const aRes = await supa(env, `oli_artists?id=eq.${artist_id}&select=*`);
+  const artists = await aRes.json();
+  if (!artists?.length) return json({ error: 'not found' }, 404, request);
+  const artist = artists[0];
+
+  // Get template
+  const tRes = await supa(env, 'oli_email_templates?is_default=eq.true&limit=1');
+  const templates = await tRes.json();
+  const template = templates?.[0];
+
+  // Get some lots for context
+  const lotsRes = await supa(env, `oli_lots?artist_name=eq.${encodeURIComponent(artist.name)}&select=title,hammer_price,auction_house&limit=10`);
+  const lots = await lotsRes.json();
+
+  const lotContext = lots.slice(0, 5).map(l =>
+    `"${l.title}" at ${l.auction_house}${l.hammer_price ? ` ($${l.hammer_price})` : ''}`
+  ).join(', ');
+
+  const prompt = `Write a warm, brief, personal email from Eli Kagan (who runs Object Lesson, a vintage/art shop in Pasadena, CA with his partner Megan Gage) to ${artist.name}.
+
+Context about the artist:
+- ${artist.ai_summary || 'An artist/designer whose work has appeared at auction.'}
+- Their work has appeared at: ${artist.auction_houses?.join(', ') || 'various auction houses'}
+- Recent lots: ${lotContext}
+- They are based in: ${artist.location || 'unknown location'}
+- Categories: ${artist.categories?.join(', ') || 'art/design'}
+
+The email should:
+- Be genuinely warm and personal, not corporate
+- Reference specific pieces or aspects of their work that Eli might admire
+- Mention Object Lesson naturally (objectlesson.la)
+- Suggest working together — consigning pieces, a small collaboration, or just connecting
+- Be SHORT — 3-4 short paragraphs max, casual tone
+- Sign off as "Eli Kagan" with "Object Lesson" and "objectlesson.la" below
+- Do NOT include a subject line in the body
+
+Also generate a subject line.
+
+Return JSON: {"subject": "...", "body": "..."}`;
+
+  const raw = await gemini(env, prompt, { temperature: 0.7, maxTokens: 2048 });
+  let email = {};
+  try {
+    const jsonStr = raw.match(/\{[\s\S]*\}/)?.[0];
+    email = JSON.parse(jsonStr);
+  } catch {
+    return json({ error: 'email generation failed' }, 500, request);
+  }
+
+  return json({
+    ok: true,
+    subject: email.subject,
+    body: email.body,
+    to: artist.email || null,
+    from: 'eli@objectlesson.la',
+    artist_name: artist.name
+  }, 200, request);
+}
+
+// ── Email Sending via Resend ─────────────────────────────
+
+async function sendEmail(request, env) {
+  const { artist_id, to, subject, body, from } = await request.json();
+  if (!to || !subject || !body) return json({ error: 'to, subject, body required' }, 400, request);
+
+  const fromAddr = from || 'Eli Kagan <eli@objectlesson.la>';
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.RESEND_KEY}`,
+      'Content-Type': 'application/json'
+    },
     body: JSON.stringify({
-      positive_centroid: posCentroid, negative_centroid: negCentroid,
-      positive_count: posCount, negative_count: negCount,
-      updated_at: new Date().toISOString()
+      from: fromAddr,
+      to: [to],
+      subject,
+      text: body
     })
   });
 
-  const nextOffset = batchOffset + batchSize;
-  return json({
-    ok: true, done: swipes.length < batchSize,
-    processed, skipped, batch: swipes.length,
-    next_offset: nextOffset,
-    positive_count: posCount, negative_count: negCount
-  }, 200, request);
+  const result = await res.json();
 
-  } catch (e) {
-    return json({ error: e.message, stack: e.stack }, 500, request);
+  if (!res.ok) {
+    return json({ error: 'send failed', details: result }, res.status, request);
   }
-}
 
-// ── POST /migrate ────────────────────────────────────────
+  // Log outreach
+  if (artist_id) {
+    await supa(env, 'oli_outreach', {
+      method: 'POST',
+      body: JSON.stringify({
+        artist_id,
+        type: 'email',
+        direction: 'outbound',
+        subject,
+        body,
+        to_address: to,
+        from_address: fromAddr,
+        resend_id: result.id,
+        status: 'sent',
+        sent_at: new Date().toISOString()
+      })
+    });
 
-async function supaSQL(env, query) {
-  // Use Supabase's raw SQL endpoint (requires service_role key)
-  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/exec_sql`, {
-    method: 'POST',
-    headers: {
-      'apikey': env.SUPABASE_SERVICE_KEY,
-      'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ query })
-  });
-  return { status: res.status, ok: res.ok, body: await res.text() };
-}
+    // Update artist status to contacted
+    await supa(env, `oli_artists?id=eq.${artist_id}&status=eq.lead`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'contacted', updated_at: new Date().toISOString() })
+    });
+  }
 
-async function handleMigrate(request, env) {
-  // Return the SQL that needs to be run manually in Supabase SQL Editor
-  const sql = `
--- Phase 2A: Prediction accuracy tracking
-ALTER TABLE swipes ADD COLUMN IF NOT EXISTS predicted_score FLOAT;
-
--- Phase 3A: Richer auction data
-ALTER TABLE listings ADD COLUMN IF NOT EXISTS auction_data JSONB;
-
--- 1. Add maker column to listings
-ALTER TABLE listings ADD COLUMN IF NOT EXISTS maker TEXT;
-
--- 2. Create artists table
-CREATE TABLE IF NOT EXISTS artists (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL UNIQUE,
-  birth_year INT,
-  age INT,
-  location TEXT,
-  medium TEXT,
-  rep_status TEXT,
-  rep_label TEXT,
-  priority TEXT,
-  tags TEXT,
-  links TEXT[],
-  notes TEXT,
-  source TEXT DEFAULT 'manual',
-  listing_count INT DEFAULT 0,
-  avg_price NUMERIC,
-  created_at TIMESTAMPTZ DEFAULT now(),
-  updated_at TIMESTAMPTZ DEFAULT now()
-);
-
--- 3. RLS for artists table
-ALTER TABLE artists ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS "anon_read_artists" ON artists;
-CREATE POLICY "anon_read_artists" ON artists FOR SELECT TO anon USING (true);
-DROP POLICY IF EXISTS "service_write_artists" ON artists;
-CREATE POLICY "service_write_artists" ON artists FOR ALL TO service_role USING (true);
-
--- 4. Update match_listings: neg weight 0.3 → 0.5
-CREATE OR REPLACE FUNCTION match_listings(
-  query_embedding VECTOR(768),
-  neg_embedding VECTOR(768) DEFAULT NULL,
-  match_count INT DEFAULT 20,
-  exclude_ids UUID[] DEFAULT '{}'
-)
-RETURNS TABLE (
-  id UUID, platform TEXT, platform_id TEXT, title TEXT, description TEXT,
-  price NUMERIC, location TEXT, url TEXT, hero_image TEXT, image_urls TEXT[],
-  auction_house TEXT, auction_date TIMESTAMPTZ, lot_number TEXT,
-  ai_description TEXT, maker TEXT, auction_data JSONB, similarity FLOAT
-)
-LANGUAGE plpgsql AS $$
-BEGIN
-  RETURN QUERY
-  SELECT
-    l.id, l.platform, l.platform_id, l.title, l.description,
-    l.price, l.location, l.url, l.hero_image, l.image_urls,
-    l.auction_house, l.auction_date, l.lot_number,
-    l.ai_description, l.maker, l.auction_data,
-    CASE
-      WHEN neg_embedding IS NOT NULL THEN
-        (1 - (l.embedding <=> query_embedding))::FLOAT - 0.5 * (1 - (l.embedding <=> neg_embedding))::FLOAT
-      ELSE
-        (1 - (l.embedding <=> query_embedding))::FLOAT
-    END AS similarity
-  FROM listings l
-  WHERE l.status = 'active'
-    AND l.embedding IS NOT NULL
-    AND l.hero_image IS NOT NULL
-    AND NOT (l.id = ANY(exclude_ids))
-  ORDER BY similarity DESC
-  LIMIT match_count;
-END;
-$$;
-
--- 5. k-NN prediction: for each listing, find K nearest swiped items and return % liked
-CREATE OR REPLACE FUNCTION predict_knn(
-  target_ids UUID[],
-  k INT DEFAULT 10
-)
-RETURNS TABLE (listing_id UUID, knn_score FLOAT)
-LANGUAGE plpgsql AS $$
-BEGIN
-  RETURN QUERY
-  SELECT
-    t.id AS listing_id,
-    COALESCE(nn.score, 0.5)::FLOAT AS knn_score
-  FROM unnest(target_ids) AS tid(id)
-  JOIN listings t ON t.id = tid.id AND t.embedding IS NOT NULL
-  LEFT JOIN LATERAL (
-    SELECT AVG(
-      CASE WHEN s.action IN ('right', 'favorite', 'super_like') THEN 1.0 ELSE 0.0 END
-    ) AS score
-    FROM (
-      SELECT sw.action
-      FROM swipes sw
-      JOIN listings sl ON sl.id = sw.listing_id AND sl.embedding IS NOT NULL
-      ORDER BY sl.embedding <=> t.embedding
-      LIMIT k
-    ) s
-  ) nn ON true;
-END;
-$$;
-
--- 6. Index for faster k-NN lookups
-CREATE INDEX IF NOT EXISTS idx_listings_embedding_hnsw
-  ON listings USING hnsw (embedding vector_cosine_ops);
-  `.trim();
-
-  return json({
-    message: 'Run this SQL in Supabase SQL Editor (https://supabase.com/dashboard → SQL Editor)',
-    sql
-  }, 200, request);
+  return json({ ok: true, resend_id: result.id }, 200, request);
 }
 
 // ── GET /artists ─────────────────────────────────────────
 
-async function handleGetArtists(request, env) {
-  const res = await supa(env, 'artists?select=*&order=priority.asc,name.asc');
+async function getArtists(request, url, env) {
+  const status = url.searchParams.get('status');
+  const search = url.searchParams.get('q');
+  const limit = url.searchParams.get('limit') || '50';
+  const offset = url.searchParams.get('offset') || '0';
+  const order = url.searchParams.get('order') || 'lot_count.desc.nullslast';
+
+  let filter = 'select=*';
+  if (status) filter += `&status=eq.${status}`;
+  if (search) filter += `&name=ilike.*${encodeURIComponent(search)}*`;
+  filter += `&order=${order}&limit=${limit}&offset=${offset}`;
+
+  const res = await supa(env, `oli_artists?${filter}`, {
+    prefer: 'return=representation,count=exact',
+    headers: { 'Prefer': 'return=representation,count=exact' }
+  });
+
   const artists = await res.json();
-  if (!Array.isArray(artists) || artists.length === 0) {
-    return json({ artists: [] }, 200, request);
-  }
+  const total = res.headers.get('content-range')?.split('/')?.[1] || null;
 
-  // Fetch listings by maker — images, URLs, titles for linking back to swiped pieces
-  const names = artists.map(a => a.name);
-  const thumbRes = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/listings?maker=in.(${names.map(n => encodeURIComponent('"' + n.replace(/"/g, '\\"') + '"')).join(',')})&hero_image=not.is.null&select=id,maker,hero_image,title,url,price&limit=500`,
-    { headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}` } }
-  );
-  const thumbRows = await thumbRes.json();
-
-  // Fetch swiped listing IDs to identify which pieces the user actually swiped on
-  const swipeRes = await fetch(`${env.SUPABASE_URL}/rest/v1/swipes?action=in.(right,favorite,super_like)&select=listing_id`, {
-    headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`, 'Range': '0-9999' }
-  });
-  const swipeRows = await swipeRes.json();
-  const swipedSet = new Set(Array.isArray(swipeRows) ? swipeRows.map(s => String(s.listing_id)) : []);
-
-  const thumbMap = {};
-  const sourceListingMap = {}; // artist name → { title, url, hero_image, price, swiped }
-  if (Array.isArray(thumbRows)) {
-    // Group listings by maker
-    const byMaker = {};
-    thumbRows.forEach(r => {
-      if (!byMaker[r.maker]) byMaker[r.maker] = [];
-      byMaker[r.maker].push(r);
-    });
-    // For each artist, prefer a swiped listing, else use the first one
-    for (const [maker, listings] of Object.entries(byMaker)) {
-      const swiped = listings.find(l => swipedSet.has(String(l.id)));
-      const pick = swiped || listings[0];
-      thumbMap[maker] = pick.hero_image;
-      sourceListingMap[maker] = {
-        title: pick.title,
-        url: pick.url,
-        hero_image: pick.hero_image,
-        price: pick.price,
-        swiped: !!swiped
-      };
-    }
-  }
-
-  // Second pass: for artists without a maker match, search listing titles
-  const missing = names.filter(n => !thumbMap[n]);
-  if (missing.length > 0) {
-    const toSearch = missing.slice(0, 15);
-    const titleSearches = await Promise.all(toSearch.map(async (name) => {
-      try {
-        const r = await fetch(
-          `${env.SUPABASE_URL}/rest/v1/listings?title=ilike.*${encodeURIComponent(name)}*&hero_image=not.is.null&select=title,hero_image&limit=1`,
-          { headers: { 'apikey': env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}` } }
-        );
-        const rows = await r.json();
-        if (Array.isArray(rows) && rows.length > 0) return { name, image: rows[0].hero_image };
-      } catch {}
-      return null;
-    }));
-    titleSearches.forEach(r => { if (r) thumbMap[r.name] = r.image; });
-  }
-
-  // Third pass: Art Institute of Chicago API — actual artwork images
-  const stillMissing = names.filter(n => !thumbMap[n]);
-  if (stillMissing.length > 0) {
-    const artworkSearches = await Promise.all(stillMissing.slice(0, 20).map(async (name) => {
-      try {
-        const r = await fetch(
-          `https://api.artic.edu/api/v1/artworks/search?q=${encodeURIComponent(name)}&fields=image_id,artist_title&limit=5`
-        );
-        const data = await r.json();
-        if (data?.data) {
-          // Find first result with an image that matches the artist
-          const match = data.data.find(d => d.image_id && d.artist_title?.toLowerCase().includes(name.split(' ').pop().toLowerCase()));
-          const fallback = data.data.find(d => d.image_id);
-          const pick = match || fallback;
-          if (pick?.image_id) {
-            return { name, image: `https://www.artic.edu/iiif/2/${pick.image_id}/full/600,/0/default.jpg` };
-          }
-        }
-      } catch {}
-      return null;
-    }));
-    artworkSearches.forEach(r => { if (r) thumbMap[r.name] = r.image; });
-  }
-
-  artists.forEach(a => {
-    a.thumbnail = thumbMap[a.name] || null;
-    a.source_listing = sourceListingMap[a.name] || null;
-  });
-  return json({ artists }, 200, request);
+  return json({ artists: artists || [], total: total ? parseInt(total) : null }, 200, request);
 }
 
-// ── POST /artists ────────────────────────────────────────
+// ── GET /artists/:id ─────────────────────────────────────
 
-async function handleImportArtists(request, env) {
-  try {
-    const artists = await request.json();
-    if (!Array.isArray(artists)) {
-      return json({ error: 'Expected JSON array of artists' }, 400, request);
-    }
+async function getArtist(request, url, env) {
+  const id = url.pathname.split('/')[2];
+  const res = await supa(env, `oli_artists?id=eq.${id}&select=*`);
+  const artists = await res.json();
+  if (!artists?.length) return json({ error: 'not found' }, 404, request);
 
-    // Upsert by name (on_conflict=name for merge-duplicates)
-    const res = await supa(env, 'artists?on_conflict=name', {
-      method: 'POST',
-      body: JSON.stringify(artists),
-      headers: {
-        'Prefer': 'return=representation,resolution=merge-duplicates'
-      }
-    });
-    const result = await res.json();
-    if (!Array.isArray(result)) {
-      return json({ ok: false, error: result, imported: 0 }, 200, request);
-    }
-    return json({
-      ok: true,
-      imported: result.length
-    }, 200, request);
-  } catch (e) {
-    return json({ error: e.message, stack: e.stack }, 500, request);
-  }
+  // Get outreach history
+  const outRes = await supa(env, `oli_outreach?artist_id=eq.${id}&select=*&order=created_at.desc`);
+  const outreach = await outRes.json();
+
+  // Get lot count and recent lots
+  const lotsRes = await supa(env, `oli_lots?artist_name=eq.${encodeURIComponent(artists[0].name)}&select=*&order=sale_date.desc.nullslast&limit=50`);
+  const lots = await lotsRes.json();
+
+  return json({
+    artist: artists[0],
+    outreach: outreach || [],
+    lots: lots || []
+  }, 200, request);
 }
 
-// ── DELETE /artists?name=... ─────────────────────────────
+// ── PATCH /artists ───────────────────────────────────────
 
-async function handleDeleteArtist(request, env, url) {
-  const name = url.searchParams.get('name');
-  if (!name) return json({ error: 'name param required' }, 400, request);
-  const res = await supa(env, `artists?name=eq.${encodeURIComponent(name)}`, {
-    method: 'DELETE',
-    headers: { 'Prefer': 'return=representation' }
+async function patchArtist(request, env) {
+  const body = await request.json();
+  const { id, ...updates } = body;
+  if (!id) return json({ error: 'id required' }, 400, request);
+
+  updates.updated_at = new Date().toISOString();
+
+  const res = await supa(env, `oli_artists?id=eq.${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(updates)
   });
+
   const result = await res.json();
-  return json({ ok: true, deleted: Array.isArray(result) ? result.length : 0 }, 200, request);
+  return json({ ok: true, artist: result?.[0] || null }, 200, request);
 }
 
-// ── PATCH /artists ─────────────────────────────────────
-// Body: { name: "Artist Name", priority: "high"|"med"|"low"|"archived" }
+// ── DELETE /artists/:id ──────────────────────────────────
 
-async function handlePatchArtist(request, env) {
-  const { name, priority } = await request.json();
-  if (!name) return json({ error: 'name required' }, 400, request);
-  const updates = {};
-  if (priority) updates.priority = priority;
-  const res = await supa(env, `artists?name=eq.${encodeURIComponent(name)}`, {
-    method: 'PATCH',
-    body: JSON.stringify(updates),
-    headers: { 'Prefer': 'return=representation' }
+async function deleteArtist(request, url, env) {
+  const id = url.pathname.split('/')[2];
+  await supa(env, `oli_artists?id=eq.${id}`, { method: 'DELETE' });
+  return json({ ok: true }, 200, request);
+}
+
+// ── GET /artists/:id/lots ────────────────────────────────
+
+async function getArtistLots(request, url, env) {
+  const id = url.pathname.split('/')[2];
+  const aRes = await supa(env, `oli_artists?id=eq.${id}&select=name`);
+  const artists = await aRes.json();
+  if (!artists?.length) return json({ error: 'not found' }, 404, request);
+
+  const lotsRes = await supa(env, `oli_lots?artist_name=eq.${encodeURIComponent(artists[0].name)}&select=*&order=sale_date.desc.nullslast`);
+  const lots = await lotsRes.json();
+  return json({ lots: lots || [] }, 200, request);
+}
+
+// ── GET /lots ────────────────────────────────────────────
+
+async function getLots(request, url, env) {
+  const house = url.searchParams.get('house');
+  const unassigned = url.searchParams.get('unassigned');
+  const limit = url.searchParams.get('limit') || '100';
+
+  let filter = 'select=id,title,auction_house,hammer_price,sale_date,image_urls,artist_name';
+  if (house) filter += `&auction_house=eq.${encodeURIComponent(house)}`;
+  if (unassigned === 'true') filter += '&artist_name=is.null';
+  filter += `&order=sale_date.desc.nullslast&limit=${limit}`;
+
+  const res = await supa(env, `oli_lots?${filter}`);
+  const lots = await res.json();
+  return json({ lots: lots || [] }, 200, request);
+}
+
+// ── GET /outreach ────────────────────────────────────────
+
+async function getOutreach(request, url, env) {
+  const artistId = url.searchParams.get('artist_id');
+  let filter = 'select=*,oli_artists(name)&order=created_at.desc&limit=50';
+  if (artistId) filter = `artist_id=eq.${artistId}&${filter}`;
+
+  const res = await supa(env, `oli_outreach?${filter}`);
+  const outreach = await res.json();
+  return json({ outreach: outreach || [] }, 200, request);
+}
+
+// ── GET /pipeline/stats ──────────────────────────────────
+
+async function getPipelineStats(request, env) {
+  // Get counts by status
+  const res = await supa(env, 'oli_artists?select=status', { prefer: 'return=representation' });
+  const artists = await res.json();
+
+  const counts = {};
+  for (const a of (artists || [])) {
+    counts[a.status] = (counts[a.status] || 0) + 1;
+  }
+
+  // Get total lots
+  const lotsRes = await supa(env, 'oli_lots?select=id', {
+    prefer: 'return=representation,count=exact',
+    headers: { 'Prefer': 'return=representation,count=exact,head=true' }
   });
-  const result = await res.json();
-  return json({ ok: true, updated: Array.isArray(result) ? result.length : 0 }, 200, request);
+  const lotTotal = lotsRes.headers.get('content-range')?.split('/')?.[1] || '0';
+
+  // Get outreach stats
+  const outRes = await supa(env, 'oli_outreach?select=status');
+  const outreach = await outRes.json();
+  const outCounts = {};
+  for (const o of (outreach || [])) {
+    outCounts[o.status] = (outCounts[o.status] || 0) + 1;
+  }
+
+  return json({
+    pipeline: counts,
+    total_artists: artists?.length || 0,
+    total_lots: parseInt(lotTotal),
+    outreach: outCounts,
+    total_outreach: outreach?.length || 0
+  }, 200, request);
 }
 
-// ── POST /fix-houses ─────────────────────────────────────
-
-async function handleFixHouses(request, env) {
-  // Fix listings with auction_house = 'Unknown' → 'Rago' (all from seller 176 batch)
-  const res = await supa(env, "listings?auction_house=eq.Unknown", {
-    method: 'PATCH',
-    body: JSON.stringify({ auction_house: 'Rago' }),
-    headers: { 'Prefer': 'return=representation' }
-  });
-  const fixed = await res.json();
-  return json({ ok: true, fixed: Array.isArray(fixed) ? fixed.length : 0 }, 200, request);
-}
-
-// ── POST /scrape ──────────────────────────────────────────
-
-async function handleScrape(request, env) {
-  try {
-    const body = await request.json().catch(() => ({}));
-
-    if (body.shopify) {
-      // Scrape a Shopify store by key
-      const count = await scrapeShopifyStore(env, body.shopify);
-      const store = SHOPIFY_STORES[body.shopify];
-      return json({ ok: true, new_listings: count, store: store?.name || body.shopify }, 200, request);
-    }
-
-    if (body.seller_id) {
-      // Scrape a single LiveAuctioneers house
-      const houseName = LA_SELLERS[body.seller_id] || 'Unknown';
-      const count = await scrapeSellerListings(env, parseInt(body.seller_id), houseName);
-      return json({ ok: true, new_listings: count, house: houseName }, 200, request);
-    }
-
-    // No params: return all available sources
-    const laHouses = Object.entries(LA_SELLERS).map(([id, name]) => ({ id, name, type: 'liveauctioneers' }));
-    const shopifyStores = Object.entries(SHOPIFY_STORES).map(([key, s]) => ({ key, name: s.name, type: 'shopify' }));
-    return json({ sources: [...laHouses, ...shopifyStores], message: 'POST with {seller_id} or {shopify: "key"}' }, 200, request);
-  } catch (e) {
-    return json({ error: e.message, stack: e.stack }, 500, request);
-  }
-}
-
-async function handleProcess(request, env) {
-  try {
-    const result = await processUnembeddedListings(env);
-    return json({ ok: true, ...result }, 200, request);
-  } catch (e) {
-    return json({ error: e.message, stack: e.stack, type: 'handleProcess' }, 500, request);
-  }
-}
-
-// Debug endpoint
-async function handleDebugProcess(request, env) {
-  const errors = [];
-  try {
-    const res = await supa(env,
-      'listings?ai_description=is.null&status=eq.active&select=id,title,hero_image&limit=1'
-    );
-    const listings = await res.json();
-    if (!listings || listings.length === 0) return json({ msg: 'No unprocessed listings' }, 200, request);
-
-    const listing = listings[0];
-    errors.push({ step: 'got_listing', title: listing.title, image: listing.hero_image });
-
-    // Try fetching image
-    const imgRes = await fetch(listing.hero_image);
-    errors.push({ step: 'image_fetch', status: imgRes.status, type: imgRes.headers.get('content-type') });
-
-    const imgBuf = await imgRes.arrayBuffer();
-    errors.push({ step: 'image_buffer', size: imgBuf.byteLength });
-
-    const bytes = new Uint8Array(imgBuf);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    const imageBase64 = btoa(binary);
-    errors.push({ step: 'base64', length: imageBase64.length });
-
-    // Try Gemini
-    const geminiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [
-            { inline_data: { mime_type: 'image/jpeg', data: imageBase64 } },
-            { text: 'Describe this auction item in one paragraph.' }
-          ]}]
-        })
-      }
-    );
-    const geminiData = await geminiRes.json();
-    const desc = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
-    errors.push({ step: 'gemini', status: geminiRes.status, desc_length: desc?.length, desc_preview: desc?.slice(0, 100), error: geminiData?.error });
-
-    // Try embedding
-    if (desc) {
-      const embRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=${env.GEMINI_KEY}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'models/gemini-embedding-001',
-            content: { parts: [{ text: desc }] },
-            outputDimensionality: 768
-          })
-        }
-      );
-      const embData = await embRes.json();
-      const emb = embData?.embedding?.values;
-      errors.push({ step: 'embedding', status: embRes.status, dim: emb?.length, error: embData?.error });
-    }
-
-    return json({ debug: errors }, 200, request);
-  } catch (e) {
-    errors.push({ step: 'error', msg: e.message, stack: e.stack });
-    return json({ debug: errors }, 500, request);
-  }
-}
-
-// ── Pipeline: Scrape → AI Describe → Embed ────────────────
-
-async function runPipeline(env) {
-  console.log('[OLI] Pipeline starting...');
-
-  // Step 1: Scrape listings from all platforms
-  const newListings = await scrapeAll(env);
-  console.log(`[OLI] Scraped ${newListings} new listings`);
-
-  // Step 2: Process un-described listings with Gemini
-  await processUnembeddedListings(env);
-
-  // Step 3: Expire old listings
-  await expireOldListings(env);
-
-  console.log('[OLI] Pipeline complete');
-}
-
-// ── Scraping ──────────────────────────────────────────────
-
-async function scrapeAll(env) {
-  let total = 0;
-
-  // LiveAuctioneers
-  try {
-    const la = await scrapeLiveAuctioneers(env);
-    total += la;
-  } catch (e) {
-    console.error('[OLI] LiveAuctioneers scrape failed:', e);
-  }
-
-  // Shopify stores
-  try {
-    const sh = await scrapeAllShopify(env);
-    total += sh;
-  } catch (e) {
-    console.error('[OLI] Shopify scrape failed:', e);
-  }
-
-  return total;
-}
-
-// LiveAuctioneers seller IDs for tracked auction houses
-const LA_SELLERS = {
-  // Primary sources
-  5004:  'Hughes Estate Sales',
-  1285:  'Abell Auction',
-  6110:  'Redlands Antique Auction',
-  10356: "Salon d'Marquis",
-  // Additional houses
-  237:   'Los Angeles Modern Auctions',
-  3822:  'BILLINGS',
-  7732:  'Catalog Projects',
-  8902:  'Circa Auction',
-  390:   'Uniques and Antiques, Inc.',
-  3967:  'Cain Modern Auctions',
-  176:   'Rago/Wright',
-  369:   'Wright',
-  5584:  'Chairish Auctions'
-};
-
-const LA_SEARCH_URL = 'https://search-party-prod.liveauctioneers.com/search/v4/web';
-const LA_IMAGE_BASE = 'https://p1.liveauctioneers.com';
-
-async function scrapeLiveAuctioneers(env) {
-  let totalNew = 0;
-
-  for (const [sellerId, houseName] of Object.entries(LA_SELLERS)) {
-    try {
-      const count = await scrapeSellerListings(env, parseInt(sellerId), houseName);
-      totalNew += count;
-      console.log(`[OLI] ${houseName}: ${count} new listings`);
-    } catch (e) {
-      console.error(`[OLI] Failed to scrape ${houseName}:`, e);
-    }
-    // Small delay between houses
-    await sleep(1000);
-  }
-
-  return totalNew;
-}
-
-async function scrapeSellerListings(env, sellerId, houseName) {
-  let totalNew = 0;
-  let page = 1;
-  const maxPages = 5; // Keep runs short to avoid Worker timeout
-
-  while (page <= maxPages) {
-    const params = {
-      analyticsTags: ['web'],
-      categories: [],
-      distance: {},
-      options: {
-        status: ['upcoming', 'live', 'online'],
-        auctionHouse: [{ exclude: [], include: [sellerId] }]
-      },
-      page,
-      pageSize: 24,
-      publishDate: {},
-      ranges: {},
-      saleDate: {},
-      searchTerm: '',
-      citySlug: '',
-      region: '',
-      sort: '-relevance',
-      seoSearch: false
-    };
-
-    const url = `${LA_SEARCH_URL}?parameters=${encodeURIComponent(JSON.stringify(params))}&skipAggs=true`;
-
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': 'application/json'
-      }
-    });
-
-    if (!res.ok) {
-      console.error(`[OLI] LA search failed: ${res.status}`);
-      break;
-    }
-
-    const data = await res.json();
-    const items = data?.payload?.items || [];
-
-    if (items.length === 0) break;
-
-    // Batch transform all items on this page
-    const batch = items.map(item => transformLAItem(item, sellerId, houseName));
-
-    // Bulk upsert — merge to update auction_data on existing listings
-    const upsertRes = await supa(env, 'listings?on_conflict=platform,platform_id', {
-      method: 'POST',
-      body: JSON.stringify(batch),
-      headers: {
-        'Prefer': 'return=representation,resolution=merge-duplicates'
-      }
-    });
-    const inserted = await upsertRes.json();
-    totalNew += Array.isArray(inserted) ? inserted.length : 0;
-
-    // Check if more pages
-    const totalPages = data?.payload?.totalPages || 0;
-    if (page >= totalPages) break;
-    page++;
-
-    await sleep(300);
-  }
-
-  return totalNew;
-}
-
-function buildLAImageUrl(sellerId, catalogId, itemId, photoIndex, imageVersion) {
-  return `${LA_IMAGE_BASE}/${sellerId}/${catalogId}/${itemId}_${photoIndex}_x.jpg?height=600&quality=95&version=${imageVersion || ''}`;
-}
-
-function transformLAItem(item, sellerId, houseName) {
-  const photos = item.photos || [1];
-  const imageUrls = photos.map(p =>
-    buildLAImageUrl(sellerId, item.catalogId, item.itemId, p, item.imageVersion)
-  );
-
-  return {
-    platform: 'liveauctioneers',
-    platform_id: String(item.itemId),
-    title: item.title || 'Untitled',
-    description: item.shortDescription || '',
-    price: item.lowBidEstimate || item.startPrice || null,
-    currency: item.currency || 'USD',
-    location: [item.sellerCity, item.sellerStateCode].filter(Boolean).join(', '),
-    url: `https://www.liveauctioneers.com/item/${item.itemId}`,
-    image_urls: imageUrls,
-    hero_image: imageUrls[0] || null,
-    auction_house: houseName,
-    auction_date: item.saleStartTs ? new Date(item.saleStartTs * 1000).toISOString() : null,
-    lot_number: item.lotNumber || null,
-    status: 'active',
-    auction_data: {
-      low_estimate: item.lowBidEstimate || null,
-      high_estimate: item.highBidEstimate || null,
-      start_price: item.startPrice || null,
-      leading_bid: item.leadingBid || 0,
-      bid_count: item.bidCount || 0,
-      sale_start: item.saleStartTs ? new Date(item.saleStartTs * 1000).toISOString() : null,
-      lot_end_estimate: item.lotEndTimeEstimatedTs ? new Date(item.lotEndTimeEstimatedTs * 1000).toISOString() : null,
-      catalog_status: item.catalogStatus || null,
-      is_live: !!item.isLiveAuction,
-      is_timed: !!item.isTimedAuction,
-      is_sold: !!item.isSold,
-      is_passed: !!item.isPassed,
-      sale_price: item.salePrice || null,
-      catalog_id: item.catalogId || null
-    }
-  };
-}
-
-// ── Shopify Store Scraping ──────────────────────────────────
-
-const SHOPIFY_STORES = {
-  'blackmancruz': { url: 'https://www.blackmancruz.com', name: 'Blackman Cruz' },
-  'thewindowla':  { url: 'https://thewindowla.com',      name: 'The Window LA' },
-  'nickeykehoe':  { url: 'https://nickeykehoe.com',       name: 'Nickey Kehoe', minPrice: 50,
-    excludeTypes: ['WOOD/FABRIC/WALLPAPER SAMPLE', 'CLEANING + UTILITY', 'BATH ACCESSORIES',
-      'BATH TOWELS', 'SHEETS & PILLOWCASES', 'BEDDING', 'BRUSHES', 'APOTHECARY', 'CANDLES',
-      'PAPER + OFFICE', 'FLATWARE', 'KITCHEN TOOLS', 'DINNERWARE', 'GARDEN ACCESSORIES'],
-    excludeTags: ['Events', 'Gift', 'Samples', 'Swatch', 'Fabric'] }
-};
-
-async function scrapeShopifyStore(env, storeKey) {
-  const store = SHOPIFY_STORES[storeKey];
-  if (!store) return 0;
-
-  let totalNew = 0;
-  let page = 1;
-  const maxPages = 6;
-
-  while (page <= maxPages) {
-    const res = await fetch(`${store.url}/products.json?limit=250&page=${page}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
-    });
-
-    if (!res.ok) {
-      console.error(`[OLI] Shopify ${store.name} fetch failed: ${res.status}`);
-      break;
-    }
-
-    const data = await res.json();
-    const products = data?.products || [];
-    if (products.length === 0) break;
-
-    // Transform to our listing format, applying store-specific filters
-    const batch = products
-      .filter(p => {
-        // Exclude by product type
-        if (store.excludeTypes && store.excludeTypes.includes(p.product_type)) return false;
-        // Exclude by tags
-        if (store.excludeTags) {
-          const tags = typeof p.tags === 'string' ? p.tags : (p.tags || []).join(',');
-          if (store.excludeTags.some(t => tags.includes(t))) return false;
-        }
-        // Exclude by minimum price
-        if (store.minPrice) {
-          const price = parseFloat(p.variants?.[0]?.price) || 0;
-          if (price < store.minPrice) return false;
-        }
-        return true;
-      })
-      .map(p => transformShopifyProduct(p, store)).filter(l => l.hero_image);
-
-    // Upsert
-    if (batch.length > 0) {
-      const upsertRes = await supa(env, 'listings', {
-        method: 'POST',
-        body: JSON.stringify(batch),
-        headers: { 'Prefer': 'return=representation,resolution=ignore-duplicates' }
-      });
-      const inserted = await upsertRes.json();
-      totalNew += Array.isArray(inserted) ? inserted.length : 0;
-    }
-
-    page++;
-    await sleep(500);
-  }
-
-  console.log(`[OLI] Shopify ${store.name}: ${totalNew} new listings`);
-  return totalNew;
-}
-
-function stripHtml(html) {
-  if (!html) return '';
-  return html.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-function transformShopifyProduct(product, store) {
-  const images = (product.images || []).map(img => img.src);
-  const variant = product.variants?.[0] || {};
-  const price = parseFloat(variant.price) || null;
-  const available = variant.available !== false;
-
-  // Extract maker from vendor (Shopify stores often use this for artist/designer name)
-  const vendor = product.vendor || '';
-  const maker = (vendor && vendor !== store.name && vendor !== 'The Window') ? vendor : null;
-
-  return {
-    platform: 'shopify',
-    platform_id: String(product.id),
-    title: product.title || 'Untitled',
-    description: stripHtml(product.body_html),
-    price,
-    currency: 'USD',
-    location: 'Los Angeles, CA',
-    url: `${store.url}/products/${product.handle}`,
-    image_urls: images,
-    hero_image: images[0] || null,
-    auction_house: store.name,
-    auction_date: product.published_at || null,
-    lot_number: null,
-    maker,
-    status: available ? 'active' : 'sold'
-  };
-}
-
-async function scrapeAllShopify(env) {
-  let total = 0;
-  for (const key of Object.keys(SHOPIFY_STORES)) {
-    try {
-      total += await scrapeShopifyStore(env, key);
-    } catch (e) {
-      console.error(`[OLI] Shopify ${key} failed:`, e);
-    }
-  }
-  return total;
-}
-
-// ── Craigslist Scraping ──────────────────────────────────
-
-const CL_SEARCHES = [
-  { url: 'https://losangeles.craigslist.org/search/ata', name: 'LA Antiques' },
-  { url: 'https://losangeles.craigslist.org/search/ara', name: 'LA Art' },
-  { url: 'https://losangeles.craigslist.org/search/fua?query=vintage', name: 'LA Vintage Furniture' },
-  { url: 'https://losangeles.craigslist.org/search/fua?query=mid+century', name: 'LA MCM Furniture' },
-  { url: 'https://losangeles.craigslist.org/search/fua?query=lamp', name: 'LA Lamps' },
-  { url: 'https://losangeles.craigslist.org/search/fua?query=sculpture', name: 'LA Sculpture' }
-];
-
-const CL_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-async function handleScrapeCraigslist(request, env) {
-  try {
-    // Only scrape ONE search per call to stay under subrequest limit
-    // Rotate through searches using a simple index
-    const url = new URL(request.url);
-    const idxParam = url.searchParams.get('idx');
-    const idx = idxParam != null ? parseInt(idxParam) : null;
-
-    if (idx != null && idx >= 0 && idx < CL_SEARCHES.length) {
-      // Scrape a specific search
-      const search = CL_SEARCHES[idx];
-      const count = await scrapeCraigslistSearch(env, search);
-      return json({ ok: true, new_listings: count, search: search.name, next_idx: (idx + 1) % CL_SEARCHES.length }, 200, request);
-    }
-
-    // Default: scrape the first one, return next index
-    const search = CL_SEARCHES[0];
-    const count = await scrapeCraigslistSearch(env, search);
-    return json({ ok: true, new_listings: count, search: search.name, total_searches: CL_SEARCHES.length, next_idx: 1 }, 200, request);
-  } catch (e) {
-    return json({ error: e.message }, 500, request);
-  }
-}
-
-async function scrapeCraigslistSearch(env, search) {
-  // Step 1: Fetch search results page
-  const res = await fetch(search.url, {
-    headers: { 'User-Agent': CL_UA, 'Accept': 'text/html' }
-  });
-  if (!res.ok) {
-    console.error(`[OLI] CL search failed: ${res.status}`);
-    return 0;
-  }
-  const html = await res.text();
-
-  // Step 2: Parse static search results
-  const resultPattern = /<li[^>]*class="[^"]*cl-static-search-result[^"]*"[^>]*>(.*?)<\/li>/gs;
-  const listings = [];
-  let match;
-  while ((match = resultPattern.exec(html)) !== null) {
-    const r = match[1];
-    const urlMatch = r.match(/href="([^"]+)"/);
-    const titleMatch = r.match(/<div class="title">(.*?)<\/div>/);
-    const priceMatch = r.match(/<div class="price">([^<]*)<\/div>/);
-    const locMatch = r.match(/<div class="location">\s*(.*?)\s*<\/div>/s);
-    if (!urlMatch) continue;
-
-    const url = urlMatch[1];
-    const clId = url.match(/\/(\d+)\.html/)?.[1];
-    if (!clId) continue;
-
-    const priceStr = (priceMatch?.[1] || '').replace(/[^0-9.]/g, '');
-    listings.push({
-      platform_id: `cl_${clId}`,
-      title: (titleMatch?.[1] || 'Untitled').trim(),
-      price: priceStr ? parseFloat(priceStr) : null,
-      location: (locMatch?.[1] || 'Los Angeles').trim(),
-      url
-    });
-  }
-
-  if (listings.length === 0) {
-    console.log(`[OLI] CL ${search.name}: no results found`);
-    return 0;
-  }
-
-  // Step 3: Check which listings are already in DB (single query for all CL listings)
-  const existingIds = new Set();
-  const checkRes = await supa(env, `listings?platform=eq.craigslist&select=platform_id`, { headers: { 'Range': '0-9999' } });
-  const existing = await checkRes.json();
-  if (Array.isArray(existing)) existing.forEach(e => existingIds.add(e.platform_id));
-
-  const newListings = listings.filter(l => !existingIds.has(l.platform_id));
-  if (newListings.length === 0) {
-    console.log(`[OLI] CL ${search.name}: ${listings.length} found, 0 new`);
-    return 0;
-  }
-
-  // Step 4: Fetch individual pages for images (limit to 8 per run to stay under 50 subrequest limit)
-  const toFetch = newListings.slice(0, 8);
-  const batch = [];
-
-  for (const listing of toFetch) {
-    try {
-      const pageRes = await fetch(listing.url, {
-        headers: { 'User-Agent': CL_UA, 'Accept': 'text/html' }
-      });
-      if (!pageRes.ok) continue;
-      const pageHtml = await pageRes.text();
-
-      // Extract first image
-      const imgMatch = pageHtml.match(/"(https:\/\/images\.craigslist\.org\/[^"]+_600x450\.jpg)"/);
-      const heroImage = imgMatch?.[1] || null;
-
-      // Extract description
-      const bodyMatch = pageHtml.match(/id="postingbody"[^>]*>(.*?)<\/section>/s);
-      let description = '';
-      if (bodyMatch) {
-        description = bodyMatch[1].replace(/<[^>]*>/g, ' ').replace(/QR Code Link to This Post/i, '').replace(/\s+/g, ' ').trim();
-      }
-
-      batch.push({
-        platform: 'craigslist',
-        platform_id: listing.platform_id,
-        title: listing.title,
-        description: description || listing.title,
-        price: listing.price,
-        currency: 'USD',
-        location: listing.location || 'Los Angeles, CA',
-        url: listing.url,
-        image_urls: heroImage ? [heroImage] : [],
-        hero_image: heroImage,
-        auction_house: 'Craigslist LA',
-        auction_date: new Date().toISOString(),
-        lot_number: null,
-        maker: null,
-        status: 'active'
-      });
-
-      await sleep(200); // Be nice to CL servers
-    } catch (e) {
-      console.error(`[OLI] CL fetch failed for ${listing.url}:`, e);
-    }
-  }
-
-  // Step 5: Upsert to DB
-  if (batch.length > 0) {
-    const upsertRes = await supa(env, 'listings', {
-      method: 'POST',
-      body: JSON.stringify(batch),
-      headers: { 'Prefer': 'return=representation,resolution=ignore-duplicates' }
-    });
-    const inserted = await upsertRes.json();
-    const count = Array.isArray(inserted) ? inserted.length : 0;
-    console.log(`[OLI] CL ${search.name}: ${listings.length} found, ${newListings.length} new, ${count} inserted`);
-    return count;
-  }
-
-  return 0;
-}
-
-// ── AI Processing ─────────────────────────────────────────
-
-async function processUnembeddedListings(env, batchSize = 10) {
-  // Each listing: 1 image fetch + 1 Gemini + 1 embedding + 1 Supabase write = 4 subrequests
-  // Worker limit: 50 subrequests. With batchSize=10, that's 40 + a few overhead = safe.
-  const res = await supa(env,
-    `listings?ai_description=is.null&status=eq.active&hero_image=not.is.null&select=id,title,description,hero_image&limit=${batchSize}`
-  );
-  const unprocessed = await res.json();
-
-  if (!unprocessed || unprocessed.length === 0) {
-    console.log('[OLI] No listings to process');
-    return { processed: 0, remaining: 0 };
-  }
-
-  let processed = 0;
-
-  for (const listing of unprocessed) {
-    try {
-      // Step 1: Generate AI description + maker from image
-      const aiResult = await generateDescription(env, listing);
-      if (!aiResult) continue;
-      const aiDesc = typeof aiResult === 'string' ? aiResult : aiResult.description;
-      const maker = (typeof aiResult === 'object' ? aiResult.maker : null);
-
-      // Step 2: Generate embedding from combined text (auction data + AI description)
-      const combinedText = [listing.title, listing.description, aiDesc].filter(Boolean).join('. ');
-      const embedding = await generateEmbedding(env, combinedText);
-      if (!embedding) continue;
-
-      // Step 3: Update listing with description, embedding, and maker if found
-      const updateData = { ai_description: aiDesc, embedding };
-      if (maker) updateData.maker = maker;
-      await supa(env, `listings?id=eq.${listing.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(updateData)
-      });
-
-      processed++;
-      console.log(`[OLI] Processed: ${listing.title}`);
-    } catch (e) {
-      console.error(`[OLI] Failed to process listing ${listing.id}:`, e);
-    }
-  }
-
-  return { processed, remaining: 'unknown' };
-}
-
-async function generateDescription(env, listing) {
-  if (!listing.hero_image) return null;
-
-  // Fetch image and convert to base64
-  let imageBase64;
-  try {
-    const imgRes = await fetch(listing.hero_image);
-    if (!imgRes.ok) throw new Error(`HTTP ${imgRes.status}`);
-    const imgBuf = await imgRes.arrayBuffer();
-    // Skip images over 2MB to avoid CPU time limit
-    if (imgBuf.byteLength > 2 * 1024 * 1024) {
-      console.log(`[OLI] Skipping large image (${(imgBuf.byteLength / 1024 / 1024).toFixed(1)}MB) for ${listing.id}`);
-      return { description: generateTextOnlyDescription(listing), maker: null };
-    }
-    // Use chunked approach to avoid max call stack with spread operator
-    const bytes = new Uint8Array(imgBuf);
-    let binary = '';
-    const CHUNK = 8192;
-    for (let i = 0; i < bytes.length; i += CHUNK) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
-    }
-    imageBase64 = btoa(binary);
-  } catch (e) {
-    console.error(`[OLI] Image fetch failed for ${listing.id}:`, e);
-    return { description: generateTextOnlyDescription(listing), maker: null };
-  }
-
-  const mimeType = listing.hero_image.includes('.png') ? 'image/png' : 'image/jpeg';
-
-  const prompt = `Analyze this auction/sale listing image of a vintage, antique, or decorative object. Return a JSON object with two fields:
-
-1. "description": A single paragraph optimized for embedding similarity search. Include:
-   - Object type (vase, chair, sculpture, lamp, painting, textile, etc.)
-   - Style/period (mid-century modern, art deco, brutalist, primitive, folk art, Memphis, postmodern, Arts & Crafts, etc.)
-   - Material (ceramic, stoneware, wood, brass, bronze, stone, glass, etc.)
-   - Color palette and surface qualities
-   - Aesthetic qualities (organic form, geometric, sculptural, minimal, ornate, textured, etc.)
-   - Size impression (small decorative, table-scale, furniture-scale)
-   Write a rich, descriptive paragraph. Do not say "this is" or "the image shows".
-
-2. "maker": The artist, designer, or maker name if identifiable from the title, description, or image. Return null if unknown or if it's a mass-produced item. Only include individual artist/designer names, not company or auction house names.
-
-Title from listing: "${listing.title || 'Unknown'}"
-${listing.description ? `Description: "${listing.description}"` : ''}
-
-Return ONLY valid JSON like: {"description": "...", "maker": "..." or null}`;
-
-  const body = {
-    contents: [{
-      parts: [
-        { inline_data: { mime_type: mimeType, data: imageBase64 } },
-        { text: prompt }
-      ]
-    }]
-  };
-
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    }
-  );
-
-  if (!res.ok) {
-    console.error(`[OLI] Gemini API error: ${res.status}`);
-    return null;
-  }
-
-  let data;
-  try {
-    data = await res.json();
-  } catch (e) {
-    console.error('[OLI] Gemini response parse error:', e);
-    return null;
-  }
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-  if (!text) return null;
-
-  // Try to parse as JSON (new format with maker extraction)
-  try {
-    const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-    return { description: parsed.description, maker: parsed.maker || null };
-  } catch {
-    // Fallback: old format (plain text description)
-    return { description: text, maker: null };
-  }
-}
-
-function generateTextOnlyDescription(listing) {
-  // Fallback: when no image, use the auction house's own catalog data
-  return [listing.title, listing.description].filter(Boolean).join('. ');
-}
-
-async function generateEmbedding(env, text) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=${env.GEMINI_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'models/gemini-embedding-001',
-        content: { parts: [{ text }] },
-        outputDimensionality: 768
-      })
-    }
-  );
-
-  if (!res.ok) {
-    console.error(`[OLI] Embedding API error: ${res.status}`);
-    return null;
-  }
-  let data;
-  try {
-    data = await res.json();
-  } catch (e) {
-    console.error('[OLI] Embedding response parse error:', e);
-    return null;
-  }
-  return data?.embedding?.values || null;
-}
-
-// ── Expiration ────────────────────────────────────────────
-
-async function expireOldListings(env) {
-  const now = new Date().toISOString();
-  await supa(env, `listings?status=eq.active&auction_date=lt.${now}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ status: 'expired' })
-  });
-}
-
-// ── Utils ─────────────────────────────────────────────────
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+// ── Utility ──────────────────────────────────────────────
+
+function median(arr) {
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }

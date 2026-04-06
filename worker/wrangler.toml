@@ -10,3 +10,4 @@ crons = ["0 */4 * * *"]
 # GEMINI_KEY
 # SUPABASE_URL
 # SUPABASE_SERVICE_KEY
+# RESEND_KEY

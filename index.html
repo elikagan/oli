@@ -15,106 +15,133 @@
   <!-- Top Bar -->
   <header id="topbar">
     <span class="topbar-title">OLI</span>
-    <div class="menu-wrap">
-      <button id="menu-btn" class="icon-btn" aria-label="Menu">
-        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <line x1="3" y1="5" x2="17" y2="5"/>
-          <line x1="3" y1="10" x2="17" y2="10"/>
-          <line x1="3" y1="15" x2="17" y2="15"/>
-        </svg>
-      </button>
-      <div id="menu-dropdown" class="menu-dropdown hidden">
-        <button class="menu-item" data-action="stats">Stats</button>
-        <button class="menu-item" data-action="refresh">Refresh Feed</button>
+    <div class="topbar-right">
+      <div class="search-wrap">
+        <input type="text" id="search-input" class="search-input" placeholder="Search artists…">
       </div>
     </div>
   </header>
 
-  <!-- Swipe Screen -->
-  <main id="scout-view" class="view">
-    <div id="pull-indicator" class="pull-indicator">
-      <div class="spinner"></div>
+  <!-- Pipeline Tabs -->
+  <nav id="pipeline-tabs">
+    <button class="ptab active" data-status="all">All</button>
+    <button class="ptab" data-status="lead">Leads</button>
+    <button class="ptab" data-status="contacted">Contacted</button>
+    <button class="ptab" data-status="responded">Responded</button>
+    <button class="ptab" data-status="deal">Deal</button>
+    <button class="ptab" data-status="consigning">Consigning</button>
+  </nav>
+
+  <!-- Main Content -->
+  <main id="main">
+    <!-- Artist List -->
+    <div id="artist-list" class="artist-list"></div>
+    <div id="empty-state" class="empty-state hidden">
+      <p>No artists yet.</p>
+      <p class="empty-sub">Import auction data to get started.</p>
     </div>
-    <div id="scout-content" class="scout-content">
-      <div id="loading" class="loading-state hidden">
-        <div class="spinner"></div>
-        <p class="loading-text">Loading listings…</p>
-      </div>
-      <div id="card-stack" class="card-stack">
-        <!-- Cards injected by JS -->
-      </div>
-      <div id="empty-state" class="empty-state hidden">
-        <p>No more listings to review.</p>
-        <p class="empty-sub">Check back later for new listings.</p>
-      </div>
+    <div id="loading" class="loading-state hidden">
+      <div class="spinner"></div>
     </div>
   </main>
 
-  <!-- Action buttons (outside scout-content to avoid will-change containment) -->
-  <div id="action-btns" class="action-btns hidden">
-    <button id="hate-btn" class="action-btn hate-btn" aria-label="Super Hate">&#128465;</button>
-    <button id="fav-btn" class="action-btn fav-btn" aria-label="Favorite">&#9733;</button>
-    <button id="super-btn" class="action-btn super-btn" aria-label="Super Like">&#128293;</button>
-  </div>
-
-  <!-- Investigate Screen -->
-  <section id="investigate-view" class="view hidden">
-    <div class="section-header" id="saved-header">Saved Items <span id="saved-count" class="section-count"></span></div>
-    <div id="fav-list" class="fav-list">
-      <!-- Favorites injected by JS -->
-    </div>
-    <div id="fav-empty" class="empty-state" style="height:auto;padding:32px 24px;">
-      <p>No saved items yet.</p>
-      <p class="empty-sub">Star items while scouting to add them here.</p>
-    </div>
-  </section>
-
-  <!-- Artists Screen -->
-  <section id="artists-view" class="view hidden">
-    <div class="section-header">Artist Targets <span id="artists-count" class="section-count"></span></div>
-    <div id="artist-list" class="fav-list">
-      <!-- Artists injected by JS -->
-    </div>
-    <div id="artist-empty" class="empty-state" style="height:auto;padding:32px 24px;">
-      <p>No artist targets loaded.</p>
-      <p class="empty-sub">Import artists via the API.</p>
-    </div>
-  </section>
-
-  <!-- Settings Screen -->
-  <section id="settings-view" class="view hidden">
-    <h2 class="settings-title">Stats</h2>
-    <div class="settings-form">
-      <div class="settings-stats" id="settings-stats"></div>
-      <div id="accuracy-chart-wrap"></div>
-      <div style="margin-top: 24px;">
-        <button id="cfg-cancel" class="btn-secondary" style="width:100%;">Back</button>
+  <!-- Artist Detail (overlay) -->
+  <section id="artist-detail" class="detail-overlay hidden">
+    <div class="detail-header">
+      <button id="detail-back" class="back-btn">&larr;</button>
+      <div class="detail-title-wrap">
+        <h2 id="detail-name" class="detail-name"></h2>
+        <span id="detail-meta" class="detail-meta"></span>
+      </div>
+      <div class="detail-actions">
+        <select id="detail-status" class="status-select"></select>
       </div>
     </div>
+    <div id="detail-body" class="detail-body">
+      <!-- Summary -->
+      <div id="detail-summary" class="detail-section"></div>
+
+      <!-- Contact Info -->
+      <div id="detail-contact" class="detail-section"></div>
+
+      <!-- Action Buttons -->
+      <div id="detail-action-btns" class="detail-action-btns"></div>
+
+      <!-- Image Grid -->
+      <div class="detail-section">
+        <div class="section-label">Auction Lots</div>
+        <div id="detail-images" class="image-grid"></div>
+      </div>
+
+      <!-- Lot List -->
+      <div id="detail-lots" class="detail-section"></div>
+
+      <!-- Outreach History -->
+      <div id="detail-outreach" class="detail-section"></div>
+    </div>
   </section>
+
+  <!-- Email Compose Modal -->
+  <div id="email-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Compose Email</h3>
+        <button id="email-close" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-field">
+          <label>To</label>
+          <input type="email" id="email-to" class="form-input">
+        </div>
+        <div class="form-field">
+          <label>Subject</label>
+          <input type="text" id="email-subject" class="form-input">
+        </div>
+        <div class="form-field">
+          <label>Body</label>
+          <textarea id="email-body" class="form-textarea" rows="12"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="email-generate" class="btn-secondary">Generate with AI</button>
+        <button id="email-send" class="btn-primary">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats / Admin (bottom sheet) -->
+  <div id="admin-sheet" class="bottom-sheet hidden">
+    <div class="sheet-handle"></div>
+    <div class="sheet-content">
+      <h3>Pipeline Stats</h3>
+      <div id="stats-grid" class="stats-grid"></div>
+      <h3 style="margin-top:20px">Import</h3>
+      <div class="import-btns">
+        <button id="btn-scrape-all" class="btn-secondary">Scrape All Houses</button>
+        <button id="btn-extract" class="btn-secondary">Extract Artists</button>
+        <button id="btn-research" class="btn-secondary">Research Batch (5)</button>
+      </div>
+      <div id="import-log" class="import-log"></div>
+    </div>
+  </div>
 
   <!-- Bottom Tab Bar -->
   <nav id="tabbar">
-    <button class="tab active" data-tab="scout">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
-      </svg>
-      <span>Scout</span>
-    </button>
-    <button class="tab" data-tab="investigate">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
-      </svg>
-      <span>Saved</span>
-    </button>
-    <button class="tab" data-tab="artists">
+    <button class="tab active" data-tab="pipeline">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
         <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
         <circle cx="9" cy="7" r="4"/>
         <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
         <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
       </svg>
-      <span>Artists</span>
+      <span>Pipeline</span>
+    </button>
+    <button class="tab" data-tab="admin">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+        <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+      </svg>
+      <span>Admin</span>
     </button>
   </nav>
 
